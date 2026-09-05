@@ -1,83 +1,79 @@
-# Codegenbox (Phase 1)
+# Codegenbox (Phase 2)
 
-Codegenbox is a local Git-clone sandbox for coding agents. This first proof of
-architecture creates a self-contained temporary session clone outside the
-source repository, then starts one disposable Docker container against that
-clone.
+Codegenbox runs a coding agent in a disposable Docker container against a
+self-contained Git session clone. Committed work is imported by the trusted
+host process only after the container exits; uncommitted work retains its clone
+for a safe later resume.
 
-## Try it
-
-Build the CLI with Go 1.22 or later:
+## Use
 
 ```sh
 go build ./cmd/codegenbox
 cd /path/to/a/git/repository
-/path/to/codegenbox codex
+codegenbox claude
+codegenbox codex
+codegenbox opencode
+codegenbox sessions
+codegenbox resume <session-id>
 ```
 
-`codegenbox codex` is shorthand for `codegenbox run codex`. The sole Phase 1
-adapter runs this command in Docker:
+`codegenbox <agent>` and `codegenbox run <agent>` are equivalent. `sessions`
+prints stable ID/agent/state/workspace/branch records without reading or
+printing credentials. `resume` requires an explicit ID; it never accepts a
+workspace path or silently chooses a session.
 
-```text
-npx --yes @openai/codex --yolo
-```
+The Phase 1 proof image remains `node:22-bookworm`. Until Phase 3 supplies a
+production image, adapters execute `npx --yes @anthropic-ai/claude-code`,
+`npx --yes @openai/codex --dangerously-bypass-approvals-and-sandbox`, and
+`npx --yes opencode-ai`. Current Codex CLI replaces Phase 1's `--yolo` spelling
+with this documented equivalent; it remains limited to the isolated container.
 
-`--yolo` intentionally bypasses Codex permission prompts, while its terminal
-UI remains interactive inside the disposable container. Codex can modify the
-isolated session clone without per-action approval; the Docker mount boundary is
-unchanged.
+## Persistent agent state
 
-The default image is `node:22-bookworm`, which Docker will pull if needed. Set
-`CODEGENBOX_IMAGE` to use an image that already contains the command instead.
-Codegenbox does not build images. Set `CODEGENBOX_DATA_DIR` to choose a
-Codegenbox-owned host storage root; the default is
-`~/.local/share/codegenbox` (or `$XDG_DATA_HOME/codegenbox`).
+Codegenbox gives each run a synthetic container home, `/home/agent`; it never
+mounts host `$HOME`. State is mounted read-write because all three CLIs can
+write login refresh data, settings, or conversation history.
 
-`CODEGENBOX_DATA_DIR` must be a host path shared with the selected Docker or
-Colima VM because each session clone is bind-mounted into the container. The
-default home-directory location is appropriate for standard Colima
-configuration. On macOS, `/tmp` resolves to `/private/tmp`, which is not shared
-by default; do not use it for `CODEGENBOX_DATA_DIR` unless that VM mount has
-been explicitly configured.
+| Agent | Host path assumption | Container path/environment | Override |
+| --- | --- | --- | --- |
+| Claude Code | `~/.claude` | `/home/agent/.claude`, `HOME=/home/agent` | `CODEGENBOX_CLAUDE_STATE_DIR` |
+| Codex | `~/.codex` | `/home/agent/.codex`, `HOME`, `CODEX_HOME` | `CODEGENBOX_CODEX_STATE_DIR` |
+| OpenCode | `$XDG_CONFIG_HOME/opencode` (or `~/.config/opencode`) and `$XDG_DATA_HOME/opencode` (or `~/.local/share/opencode`) | matching paths under `/home/agent`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | `CODEGENBOX_OPENCODE_CONFIG_DIR`, `CODEGENBOX_OPENCODE_DATA_DIR` |
 
-Run the test suite with:
+Only the selected adapter's paths are created/mounted. An override must name
+that direct agent-state directory; Codegenbox rejects host home, generic
+config/state parents, known cross-agent defaults, commas, and mount collisions.
+It has no user-controlled arbitrary mount flags.
 
-```sh
-go test ./...
-```
+The default Codegenbox storage root is `~/.local/share/codegenbox` (or
+`$XDG_DATA_HOME/codegenbox`); set `CODEGENBOX_DATA_DIR` to override it. This
+location and all state paths must be shared with Docker/Colima. Standard Colima
+shares the home directory; macOS `/tmp` resolves to `/private/tmp`, which is
+not shared by default.
 
-## Phase 1 security model
+## Security and lifecycle
 
-The Docker command is structurally restricted to one ordinary host bind mount:
-the self-contained session clone at `/workspace`. Its `.git` directory lives
-inside that mount, so Git commands such as `status`, `add`, and `commit` work
-normally in the container without mounting source-repository metadata. It uses a disposable container,
-interactive TTY, `/workspace` workdir, `--cap-drop ALL`, and
-`no-new-privileges=true`.
+The ordinary source mount is exactly the independent session clone at
+`/workspace`, including its own `.git`. Selected agent state is the only
+additional mount. Docker is run with `--rm`, interactive TTY, `--cap-drop ALL`,
+and `no-new-privileges=true`; it has no Docker socket, `--privileged`, host
+home, source-repository parent, source Git metadata, SSH, or GitHub write
+credentials.
 
-Codegenbox never mounts the host home directory, repository parent directory,
-Docker socket, or any agent state/credentials in this phase. It never uses
-`--privileged`. There are no host build-cache mounts.
+After Docker returns, Codegenbox validates and imports only the reserved
+`codegenbox/<session-id>` branch if it is the recorded base commit or a
+descendant. On resume, that branch is atomically advanced only from the
+recorded imported commit. Main and unrelated refs are untouched. Dirty and
+failed clones are never auto-deleted; committed work is still imported when a
+clone remains dirty.
 
-The clone is made with Git's no-local/no-hardlink strategy, has no Git
-alternates, and has its source remote removed before Docker starts. The source
-repository, its parent, host home, Docker socket, and all agent state or
-credentials remain unmounted.
+## Manual real-agent persistence check
 
-After Docker exits—successfully, unsuccessfully, or because its process was
-interrupted—Codegenbox reads clone Git porcelain status and imports only the
-reserved `codegenbox/<session-id>` clone branch. The imported commit must be
-the recorded base commit or a descendant; trusted host code atomically creates
-only that reserved branch in the original repository. Main, tags, and unrelated
-branches are not modified. Committed work is imported even when uncommitted
-changes remain. A clone is removed only after a clean status, verified import,
-and metadata update; dirty or validation-failed clones are retained.
-
-## Current limits
-
-Phase 1 has only the `codex` adapter, which uses `--yolo` to bypass Codex
-permission prompts inside its isolated disposable container. Its authentication
-and history are ephemeral because no host state is mounted. `resume`, session listing, agent
-persistence, production development images, private dependency access, push/PR
-workflow, resource limits, and full crash/orphan reconciliation are not yet
-implemented. See [docs/development.md](docs/development.md) for details.
+Use a temporary Git repository and, one agent at a time, run the corresponding
+Codegenbox command, complete its ordinary login (if needed), create a short
+conversation, exit with an uncommitted edit, and run `codegenbox resume <id>`.
+Verify that its own CLI offers/continues the prior conversation and login, then
+commit or remove the edit and exit. Repeat for Claude, Codex, and OpenCode.
+Check `codegenbox sessions` between runs; it must show no credentials. Do not
+copy or print state files. The structural tests cover mount isolation; this
+manual check is required because CI intentionally has no real credentials.

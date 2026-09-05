@@ -23,30 +23,7 @@ type Environment struct {
 	Runner container.Runner
 }
 
-// Run accepts `codegenbox codex` and `codegenbox run codex` only.
 func Run(ctx context.Context, arguments []string, environment Environment) error {
-	agentName, err := parseArguments(arguments)
-	if err != nil {
-		return err
-	}
-	adapter, err := agent.Lookup(agentName)
-	if err != nil {
-		return err
-	}
-
-	getwd := environment.Getwd
-	if getwd == nil {
-		getwd = os.Getwd
-	}
-	workingDirectory, err := getwd()
-	if err != nil {
-		return fmt.Errorf("read current directory: %w", err)
-	}
-	workingDirectory, err = filepath.Abs(workingDirectory)
-	if err != nil {
-		return fmt.Errorf("resolve current directory: %w", err)
-	}
-
 	loadConfig := environment.Config
 	if loadConfig == nil {
 		loadConfig = config.LoadFromEnv
@@ -64,16 +41,53 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		}
 	}
 
-	manager := session.Manager{DataRoot: configured.DataRoot, Runner: runner}
-	result, runErr := manager.Start(ctx, workingDirectory, adapter, configured.Image, configured.DockerBinary)
 	output := chooseWriter(environment.Stdout, os.Stdout)
-	if result.Metadata.ID != "" {
-		printResult(output, result)
+	manager := session.Manager{DataRoot: configured.DataRoot, Runner: runner}
+	switch {
+	case len(arguments) == 1 && arguments[0] == "sessions":
+		return printSessions(output, configured.DataRoot)
+	case len(arguments) >= 1 && arguments[0] == "resume":
+		if len(arguments) != 2 || arguments[1] == "" {
+			return fmt.Errorf("usage: codegenbox resume <session-id>")
+		}
+		result, runErr := manager.Resume(ctx, arguments[1], configured.Image, configured.DockerBinary)
+		if result.Metadata.ID != "" {
+			printResult(output, result)
+		}
+		if runErr != nil {
+			return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
+		}
+		return nil
+	default:
+		agentName, err := parseArguments(arguments)
+		if err != nil {
+			return err
+		}
+		adapter, err := agent.Lookup(agentName)
+		if err != nil {
+			return err
+		}
+		getwd := environment.Getwd
+		if getwd == nil {
+			getwd = os.Getwd
+		}
+		workingDirectory, err := getwd()
+		if err != nil {
+			return fmt.Errorf("read current directory: %w", err)
+		}
+		workingDirectory, err = filepath.Abs(workingDirectory)
+		if err != nil {
+			return fmt.Errorf("resolve current directory: %w", err)
+		}
+		result, runErr := manager.Start(ctx, workingDirectory, adapter, configured.Image, configured.DockerBinary)
+		if result.Metadata.ID != "" {
+			printResult(output, result)
+		}
+		if runErr != nil {
+			return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
+		}
+		return nil
 	}
-	if runErr != nil {
-		return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
-	}
-	return nil
 }
 
 func parseArguments(arguments []string) (string, error) {
@@ -85,7 +99,7 @@ func parseArguments(arguments []string) (string, error) {
 			return arguments[1], nil
 		}
 	}
-	return "", fmt.Errorf("usage: codegenbox <agent> | codegenbox run <agent>\nPhase 1 supports: codex")
+	return "", fmt.Errorf("usage: codegenbox <agent> | codegenbox run <agent> | codegenbox resume <session-id> | codegenbox sessions\nsupported agents: claude, codex, opencode")
 }
 
 func printResult(output io.Writer, result session.Result) {
@@ -94,12 +108,36 @@ func printResult(output io.Writer, result session.Result) {
 	case session.StateCompleted:
 		fmt.Fprintf(output, "Codegenbox session complete.\n\nBranch: %s\nTemporary workspace: removed\n", metadata.SessionBranch)
 	case session.StateDirty:
-		fmt.Fprintf(output, "Codegenbox session stopped with uncommitted changes.\n\nWorkspace preserved: %s\nSession metadata: %s\n", metadata.Worktree, session.MetadataPath(filepath.Dir(filepath.Dir(metadata.Worktree)), metadata.ID))
+		fmt.Fprintf(output, "Codegenbox session stopped with uncommitted changes.\n\nWorkspace preserved: %s\nResume: codegenbox resume %s\n", metadata.Worktree, metadata.ID)
 	case session.StateInterrupted:
 		fmt.Fprintf(output, "Codegenbox session was interrupted.\n\nWorkspace: %s\n", workspaceMessage(result))
 	case session.StateClean:
 		fmt.Fprintf(output, "Codegenbox found a clean workspace but could not remove it.\n\nWorkspace preserved: %s\n", metadata.Worktree)
 	}
+}
+
+func printSessions(output io.Writer, dataRoot string) error {
+	metadata, err := session.ListMetadata(dataRoot)
+	if err != nil {
+		return err
+	}
+	if len(metadata) == 0 {
+		_, err := fmt.Fprintln(output, "No Codegenbox sessions.")
+		return err
+	}
+	for _, item := range metadata {
+		_, statErr := os.Stat(item.Worktree)
+		workspace := "missing"
+		if statErr == nil {
+			workspace = "present"
+		} else if !os.IsNotExist(statErr) {
+			workspace = "unavailable"
+		}
+		if _, err := fmt.Fprintf(output, "%s\tagent=%s\tstate=%s\tworkspace=%s\tbranch=%s\n", item.ID, item.Agent, item.State, workspace, item.SessionBranch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func workspaceMessage(result session.Result) string {

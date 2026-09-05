@@ -17,10 +17,13 @@ import (
 // Manager coordinates isolated clone setup, Docker execution, and post-exit
 // import. It performs no source-repository import while Runner.Run is active.
 type Manager struct {
-	DataRoot string
-	Runner   container.Runner
-	Now      func() time.Time
-	NewID    func(repository string, now time.Time) (string, error)
+	DataRoot      string
+	Runner        container.Runner
+	Now           func() time.Time
+	NewID         func(repository string, now time.Time) (string, error)
+	StateResolver func(agent.Adapter) ([]container.StateMount, error)
+	// BeforeCleanup is a test-only synchronization hook. Production leaves it nil.
+	BeforeCleanup func(workspace string)
 }
 
 // Result is returned even when Docker exits unsuccessfully, so callers can
@@ -106,12 +109,81 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 		return result, err
 	}
 
-	invocation, invocationErr := container.BuildRunInvocation(dockerBinary, image, workspace, adapter.Command)
+	stateMounts, stateErr := m.resolveState(adapter)
+	if stateErr != nil {
+		return m.finish(ctx, dataRoot, repository.Root, result, stateErr)
+	}
+	invocation, invocationErr := container.BuildRunInvocation(dockerBinary, image, workspace, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts)
 	if invocationErr != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, invocationErr)
 	}
 	runErr := m.Runner.Run(ctx, invocation)
 	return m.finish(ctx, dataRoot, repository.Root, result, runErr)
+}
+
+// Resume runs the adapter recorded in retained, validated metadata. An omitted
+// ID is intentionally rejected: selecting an arbitrary path or "latest" could
+// resume the wrong repository state.
+func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Result, error) {
+	if m.Runner == nil {
+		return Result{}, fmt.Errorf("Docker runner is required")
+	}
+	if err := validateID(id); err != nil {
+		return Result{}, err
+	}
+	dataRoot, err := prepareDataRootWithoutRepository(m.DataRoot)
+	if err != nil {
+		return Result{}, err
+	}
+	metadata, err := LoadMetadata(dataRoot, id)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := validateRetainedMetadata(dataRoot, metadata); err != nil {
+		return Result{Metadata: metadata}, err
+	}
+	adapter, err := agent.Lookup(metadata.Agent)
+	if err != nil {
+		return Result{Metadata: metadata}, fmt.Errorf("recorded session adapter: %w", err)
+	}
+	repository, err := gitops.Discover(context.WithoutCancel(ctx), metadata.Repository)
+	if err != nil {
+		return Result{Metadata: metadata}, fmt.Errorf("validate recorded repository: %w", err)
+	}
+	if repository.Root != metadata.Repository {
+		return Result{Metadata: metadata}, fmt.Errorf("recorded repository identity no longer matches metadata")
+	}
+	if err := gitops.ValidateSessionClone(metadata.Worktree); err != nil {
+		return Result{Metadata: metadata}, fmt.Errorf("validate retained session clone: %w", err)
+	}
+	now := m.Now
+	if now == nil {
+		now = time.Now
+	}
+	resumed := now()
+	metadata.State, metadata.LastError, metadata.FinishedAt = StateRunning, "", nil
+	metadata.LastResumedAt, metadata.ResumeCount = &resumed, metadata.ResumeCount+1
+	result := Result{Metadata: metadata}
+	if err := WriteMetadata(dataRoot, metadata); err != nil {
+		return result, err
+	}
+	stateMounts, err := m.resolveState(adapter)
+	if err != nil {
+		return m.finish(ctx, dataRoot, repository.Root, result, err)
+	}
+	invocation, err := container.BuildRunInvocation(dockerBinary, image, metadata.Worktree, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts)
+	if err != nil {
+		return m.finish(ctx, dataRoot, repository.Root, result, err)
+	}
+	return m.finish(ctx, dataRoot, repository.Root, result, m.Runner.Run(ctx, invocation))
+}
+
+func (m Manager) resolveState(adapter agent.Adapter) ([]container.StateMount, error) {
+	resolver := m.StateResolver
+	if resolver == nil {
+		resolver = agent.ResolveState
+	}
+	return resolver(adapter)
 }
 
 func (m Manager) finish(ctx context.Context, dataRoot, repositoryRoot string, result Result, runErr error) (Result, error) {
@@ -137,7 +209,7 @@ func (m Manager) finish(ctx context.Context, dataRoot, repositoryRoot string, re
 
 	// Import committed work even when the clone also has uncommitted changes.
 	// Import is strictly post-exit and can update only the generated session ref.
-	importedCommit, importErr := gitops.ImportSessionBranch(postExitContext, repositoryRoot, metadata.Worktree, metadata.SessionBranch, metadata.BaseCommit, dataRoot)
+	importedCommit, importErr := gitops.ImportSessionBranch(postExitContext, repositoryRoot, metadata.Worktree, metadata.SessionBranch, metadata.BaseCommit, metadata.ImportedCommit, dataRoot)
 	if importErr != nil {
 		if dirty {
 			metadata.State = StateDirty
@@ -194,9 +266,16 @@ func (m Manager) finish(ctx context.Context, dataRoot, repositoryRoot string, re
 		return result, errors.Join(runErr, writeErr)
 	}
 
+	if m.BeforeCleanup != nil {
+		m.BeforeCleanup(metadata.Worktree)
+	}
 	removeErr := gitops.RemoveSessionClone(dataRoot, metadata.Worktree)
 	if removeErr != nil {
-		metadata.State = StateClean
+		if errors.Is(removeErr, gitops.ErrDirtyClone) {
+			metadata.State = StateDirty
+		} else {
+			metadata.State = StateClean
+		}
 		metadata.LastError = joinErrors(runErr, removeErr)
 		result.Metadata = metadata
 		writeErr := WriteMetadata(dataRoot, metadata)
@@ -258,6 +337,58 @@ func prepareDataRoot(dataRoot, repositoryRoot string) (string, error) {
 		return "", fmt.Errorf("Codegenbox data root resolves inside the source repository: %s", absoluteDataRoot)
 	}
 	return filepath.Clean(canonicalDataRoot), nil
+}
+
+func prepareDataRootWithoutRepository(dataRoot string) (string, error) {
+	if strings.TrimSpace(dataRoot) == "" {
+		return "", fmt.Errorf("Codegenbox data root is required")
+	}
+	abs, err := filepath.Abs(dataRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve Codegenbox data root: %w", err)
+	}
+	if err := os.MkdirAll(abs, 0o700); err != nil {
+		return "", fmt.Errorf("create Codegenbox data root: %w", err)
+	}
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve Codegenbox data root: %w", err)
+	}
+	return filepath.Clean(canonical), nil
+}
+
+func validateRetainedMetadata(dataRoot string, metadata Metadata) error {
+	if err := validateID(metadata.ID); err != nil {
+		return err
+	}
+	if metadata.Agent == "" || metadata.Repository == "" || metadata.Worktree == "" || metadata.BaseBranch == "" || metadata.BaseCommit == "" {
+		return fmt.Errorf("session metadata is missing required fields")
+	}
+	if metadata.SessionBranch != "codegenbox/"+metadata.ID {
+		return fmt.Errorf("session metadata has an unexpected reserved branch")
+	}
+	workspaceRoot, err := prepareWorkspaceRoot(dataRoot)
+	if err != nil {
+		return err
+	}
+	workspace, err := filepath.Abs(metadata.Worktree)
+	if err != nil {
+		return fmt.Errorf("resolve recorded workspace: %w", err)
+	}
+	if filepath.Clean(workspace) != filepath.Join(workspaceRoot, metadata.ID) || !isWithin(workspace, workspaceRoot) {
+		return fmt.Errorf("recorded workspace is outside Codegenbox session storage")
+	}
+	if err := gitops.ValidateSessionClone(workspace); err != nil {
+		return fmt.Errorf("recorded workspace is not a self-contained clone: %w", err)
+	}
+	repository, err := canonicalExistingPath(metadata.Repository)
+	if err != nil {
+		return fmt.Errorf("resolve recorded repository: %w", err)
+	}
+	if repository != filepath.Clean(metadata.Repository) {
+		return fmt.Errorf("recorded repository path is not canonical")
+	}
+	return nil
 }
 
 // canonicalExistingPath resolves the closest existing ancestor, so a not-yet-

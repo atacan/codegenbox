@@ -260,6 +260,21 @@ func TestLifecycleRemovesCleanWorktreeAndRecordsInterruptedDockerRun(t *testing.
 	}
 }
 
+func TestLifecycleFinalCleanupCheckPreservesLateDirtyClone(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("codex")
+	manager := testManager(dataRoot, runnerFunc(func(context.Context, container.Invocation) error { return nil }))
+	manager.BeforeCleanup = func(workspace string) { writeFile(t, filepath.Join(workspace, "late-dirty.txt"), "preserve") }
+	result, err := manager.Start(context.Background(), repository, adapter, "node:22-bookworm", "docker")
+	if err == nil || result.WorkspaceRemoved || result.Metadata.State != StateDirty {
+		t.Fatalf("result = %#v, err = %v", result, err)
+	}
+	if contents, readErr := os.ReadFile(filepath.Join(result.Metadata.Worktree, "late-dirty.txt")); readErr != nil || string(contents) != "preserve" {
+		t.Fatalf("late dirty work was removed: %q %v", contents, readErr)
+	}
+}
+
 func TestLifecycleRejectsNonDescendantExpectedBranchWithoutMutatingSourceRefs(t *testing.T) {
 	repository := newRepository(t)
 	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
@@ -299,6 +314,201 @@ func TestLifecycleRejectsNonDescendantExpectedBranchWithoutMutatingSourceRefs(t 
 	assertGitRefMissing(t, repository, "agent-created-tag")
 }
 
+func TestResumeUsesRecordedAdapterAndAtomicallyAdvancesImportedBranch(t *testing.T) {
+	repository := newRepository(t)
+	mainBefore := runGit(t, repository, "rev-parse", "main")
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("claude")
+	first := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		workspace := invocationWorktree(t, invocation)
+		assertOnlyAgentStateMounts(t, invocation, "claude")
+		writeFile(t, filepath.Join(workspace, "first.txt"), "first\n")
+		runGit(t, workspace, "add", "first.txt")
+		runGit(t, workspace, "commit", "-m", "first")
+		writeFile(t, filepath.Join(workspace, "dirty.txt"), "preserve\n")
+		return nil
+	}))
+	initial, err := first.Start(context.Background(), repository, adapter, "node:22-bookworm", "docker")
+	if err != nil || initial.Metadata.State != StateDirty || initial.Metadata.ImportedCommit == "" {
+		t.Fatalf("initial = %#v, err = %v", initial, err)
+	}
+	firstImported := initial.Metadata.ImportedCommit
+	resumed := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		assertOnlyAgentStateMounts(t, invocation, "claude")
+		workspace := invocationWorktree(t, invocation)
+		if err := os.Remove(filepath.Join(workspace, "dirty.txt")); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(workspace, "second.txt"), "second\n")
+		runGit(t, workspace, "add", "second.txt")
+		runGit(t, workspace, "commit", "-m", "second")
+		return nil
+	}))
+	result, err := resumed.Resume(context.Background(), initial.Metadata.ID, "node:22-bookworm", "docker")
+	if err != nil || !result.WorkspaceRemoved || result.Metadata.State != StateCompleted {
+		t.Fatalf("resume = %#v, err = %v", result, err)
+	}
+	if result.Metadata.Agent != "claude" || result.Metadata.ResumeCount != 1 || result.Metadata.ImportedCommit == firstImported {
+		t.Fatalf("resume metadata = %#v", result.Metadata)
+	}
+	if got := runGit(t, repository, "rev-parse", result.Metadata.SessionBranch); got != result.Metadata.ImportedCommit {
+		t.Fatalf("branch = %q, imported = %q", got, result.Metadata.ImportedCommit)
+	}
+	if got := runGit(t, repository, "branch", "--show-current"); got != "main" {
+		t.Fatalf("checkout changed to %q", got)
+	}
+	if got := runGit(t, repository, "rev-parse", "main"); got != mainBefore {
+		t.Fatalf("main changed from %q to %q", mainBefore, got)
+	}
+}
+
+func TestResumeRejectsTamperedMetadataAndPreservesClone(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("codex")
+	manager := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		writeFile(t, filepath.Join(invocationWorktree(t, invocation), "dirty.txt"), "keep\n")
+		return nil
+	}))
+	result, err := manager.Start(context.Background(), repository, adapter, "node:22-bookworm", "docker")
+	if err != nil || result.Metadata.State != StateDirty {
+		t.Fatalf("Start = %#v, %v", result, err)
+	}
+	metadata := readMetadata(t, dataRoot, result.Metadata.ID)
+	metadata.Worktree = filepath.Join(t.TempDir(), "outside")
+	payload, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(MetadataPath(dataRoot, metadata.ID), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Resume(context.Background(), result.Metadata.ID, "node:22-bookworm", "docker"); err == nil {
+		t.Fatal("tampered metadata resumed")
+	}
+	if _, err := os.Stat(result.Metadata.Worktree); err != nil {
+		t.Fatalf("retained clone was removed: %v", err)
+	}
+}
+
+func TestResumePreservesCloneWhenImportedCommitCompareAndSwapFails(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("codex")
+	first := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		workspace := invocationWorktree(t, invocation)
+		writeFile(t, filepath.Join(workspace, "commit.txt"), "one")
+		runGit(t, workspace, "add", "commit.txt")
+		runGit(t, workspace, "commit", "-m", "first")
+		writeFile(t, filepath.Join(workspace, "dirty.txt"), "keep")
+		return nil
+	}))
+	initial, err := first.Start(context.Background(), repository, adapter, "node:22-bookworm", "docker")
+	if err != nil || initial.Metadata.ImportedCommit == "" {
+		t.Fatalf("start = %#v, %v", initial, err)
+	}
+	rogue := runGit(t, repository, "commit-tree", initial.Metadata.ImportedCommit+"^{tree}", "-p", initial.Metadata.ImportedCommit, "-m", "external change")
+	runGit(t, repository, "update-ref", "refs/heads/"+initial.Metadata.SessionBranch, rogue)
+	second := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		if err := os.Remove(filepath.Join(invocationWorktree(t, invocation), "dirty.txt")); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}))
+	result, err := second.Resume(context.Background(), initial.Metadata.ID, "node:22-bookworm", "docker")
+	if err == nil || result.WorkspaceRemoved || result.Metadata.State != StateInterrupted {
+		t.Fatalf("resume = %#v, err = %v", result, err)
+	}
+	if _, statErr := os.Stat(initial.Metadata.Worktree); statErr != nil {
+		t.Fatalf("CAS-failed clone was removed: %v", statErr)
+	}
+	if got := runGit(t, repository, "rev-parse", initial.Metadata.SessionBranch); got != rogue {
+		t.Fatalf("CAS failure overwrote source branch: %q", got)
+	}
+}
+
+func TestSelectedAgentStateSurvivesReplacementWithoutCrossAgentMounts(t *testing.T) {
+	for _, name := range agent.Supported() {
+		t.Run(name, func(t *testing.T) {
+			repository := newRepository(t)
+			dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+			adapter, _ := agent.Lookup(name)
+			first := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+				state := selectedStateSource(t, invocation, name)
+				writeFile(t, filepath.Join(state, "persistence-marker"), name)
+				writeFile(t, filepath.Join(invocationWorktree(t, invocation), "dirty.txt"), "keep")
+				return nil
+			}))
+			initial, err := first.Start(context.Background(), repository, adapter, "node:22-bookworm", "docker")
+			if err != nil || initial.Metadata.State != StateDirty {
+				t.Fatalf("start = %#v, %v", initial, err)
+			}
+			second := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+				state := selectedStateSource(t, invocation, name)
+				contents, err := os.ReadFile(filepath.Join(state, "persistence-marker"))
+				if err != nil || string(contents) != name {
+					t.Fatalf("state did not persist: %q %v", contents, err)
+				}
+				if err := os.Remove(filepath.Join(invocationWorktree(t, invocation), "dirty.txt")); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			}))
+			result, err := second.Resume(context.Background(), initial.Metadata.ID, "node:22-bookworm", "docker")
+			if err != nil || !result.WorkspaceRemoved {
+				t.Fatalf("resume = %#v, %v", result, err)
+			}
+		})
+	}
+}
+
+func selectedStateSource(t *testing.T, invocation container.Invocation, name string) string {
+	t.Helper()
+	mounts := valuesAfterInvocation(invocation.Args, "--mount")
+	var selected string
+	for _, mount := range mounts {
+		if !strings.Contains(mount, "dst=/home/agent/") {
+			continue
+		}
+		if name == "claude" && !strings.Contains(mount, "dst=/home/agent/.claude") {
+			t.Fatalf("Claude received foreign state mount %q", mount)
+		}
+		if name == "codex" && !strings.Contains(mount, "dst=/home/agent/.codex") {
+			t.Fatalf("Codex received foreign state mount %q", mount)
+		}
+		if name == "opencode" && !(strings.Contains(mount, "dst=/home/agent/.config/opencode") || strings.Contains(mount, "dst=/home/agent/.local/share/opencode")) {
+			t.Fatalf("OpenCode received foreign state mount %q", mount)
+		}
+		if selected == "" {
+			selected = strings.TrimSuffix(strings.TrimPrefix(mount, "type=bind,src="), ",dst="+strings.Split(strings.TrimPrefix(mount, "type=bind,src="), ",dst=")[1])
+		}
+	}
+	if selected == "" {
+		t.Fatal("selected adapter state mount missing")
+	}
+	return selected
+}
+
+func assertOnlyAgentStateMounts(t *testing.T, invocation container.Invocation, agentName string) {
+	t.Helper()
+	mounts := valuesAfterInvocation(invocation.Args, "--mount")
+	for _, mount := range mounts {
+		if strings.Contains(mount, "/home/agent/") && !strings.Contains(mount, "/home/agent/.claude") && agentName == "claude" {
+			t.Fatalf("wrong Claude state mount %q", mount)
+		}
+	}
+}
+
+func valuesAfterInvocation(values []string, flag string) []string {
+	var result []string
+	for index := range values[:len(values)-1] {
+		if values[index] == flag {
+			result = append(result, values[index+1])
+		}
+	}
+	return result
+}
+
 func TestStartRejectsStorageInsideSourceRepository(t *testing.T) {
 	repository := newRepository(t)
 	adapter, _ := agent.Lookup("codex")
@@ -317,6 +527,17 @@ func testManager(dataRoot string, runner container.Runner) Manager {
 	return Manager{
 		DataRoot: dataRoot,
 		Runner:   runner,
+		StateResolver: func(adapter agent.Adapter) ([]container.StateMount, error) {
+			mounts := make([]container.StateMount, 0, len(adapter.State))
+			for _, location := range adapter.State {
+				path := filepath.Join(dataRoot, "agent-state", adapter.Name, location.Key)
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					return nil, err
+				}
+				mounts = append(mounts, container.StateMount{Agent: adapter.Name, Source: path, Destination: location.Destination})
+			}
+			return mounts, nil
+		},
 		Now: func() time.Time {
 			return time.Date(2026, 9, 3, 19, 30, 12, 0, time.UTC)
 		},

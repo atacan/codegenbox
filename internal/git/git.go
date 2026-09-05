@@ -18,6 +18,8 @@ const (
 	workspaceRefRoot = "refs/heads/codegenbox/"
 )
 
+var ErrDirtyClone = errors.New("session clone became dirty before cleanup")
+
 // Repository is the Git state captured before a session starts.
 type Repository struct {
 	Root       string
@@ -131,7 +133,7 @@ func IsDirty(ctx context.Context, workspace string) (bool, error) {
 // The policy is deliberately narrow: the imported commit must be baseCommit
 // itself or a descendant of it. The source ref is atomically created only if
 // absent, so main, tags, and unrelated branches cannot be changed here.
-func ImportSessionBranch(ctx context.Context, repositoryRoot, workspace, branch, baseCommit, dataRoot string) (string, error) {
+func ImportSessionBranch(ctx context.Context, repositoryRoot, workspace, branch, baseCommit, expectedImportedCommit, dataRoot string) (string, error) {
 	if err := validateSessionBranch(branch); err != nil {
 		return "", err
 	}
@@ -195,13 +197,27 @@ func ImportSessionBranch(ctx context.Context, repositoryRoot, workspace, branch,
 		return "", fmt.Errorf("import policy rejected %s: it is not %s or a descendant", commit, baseCommit)
 	}
 
-	// An all-zero old value requires this new session branch to be absent. This
-	// is a compare-and-swap update rather than a broad branch operation.
-	zero := strings.Repeat("0", len(commit))
-	if _, err := run(ctx, repositoryRoot, "update-ref", workspaceRef(branch), commit, zero); err != nil {
-		return "", fmt.Errorf("atomically create reserved session branch: %w", err)
+	// A missing ImportedCommit can only create a new reserved branch. On resume,
+	// the recorded imported OID is the exact compare-and-swap old value; this
+	// never force-updates an unrelated or externally changed source ref.
+	expected := strings.Repeat("0", len(commit))
+	if expectedImportedCommit != "" {
+		if err := validateOID(expectedImportedCommit); err != nil {
+			return "", fmt.Errorf("invalid recorded imported commit: %w", err)
+		}
+		expected = expectedImportedCommit
+	}
+	if _, err := run(ctx, repositoryRoot, "update-ref", workspaceRef(branch), commit, expected); err != nil {
+		return "", fmt.Errorf("atomically advance reserved session branch: %w", err)
 	}
 	return commit, nil
+}
+
+// ValidateSessionClone verifies the independent clone layout without reading
+// clone-controlled configuration. It is used before a retained clone is resumed.
+func ValidateSessionClone(workspace string) error {
+	_, err := validateCloneLayout(workspace)
+	return err
 }
 
 // RemoveSessionClone removes only a clone that the caller has already found
@@ -222,6 +238,16 @@ func RemoveSessionClone(dataRoot, workspace string) error {
 	}
 	if _, err := validateCloneLayout(workspace); err != nil {
 		return fmt.Errorf("validate clean session clone before removal: %w", err)
+	}
+	// This is deliberately the last operation before removal. Lifecycle's
+	// earlier status checks decide import/state; this check prevents a local
+	// writer in the remaining interval from losing uncommitted work.
+	dirty, err := IsDirty(context.Background(), workspace)
+	if err != nil {
+		return fmt.Errorf("final clean-clone status check: %w", err)
+	}
+	if dirty {
+		return fmt.Errorf("%w: %s", ErrDirtyClone, workspace)
 	}
 	if err := os.RemoveAll(workspace); err != nil {
 		return fmt.Errorf("remove clean session clone: %w", err)

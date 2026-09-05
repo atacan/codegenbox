@@ -1,10 +1,11 @@
-// Package container builds and runs the narrow Docker invocation used by Phase 1.
+// Package container builds the narrow Docker invocation used by Codegenbox.
 package container
 
 import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -12,16 +13,25 @@ import (
 
 const workspace = "/workspace"
 
-// Invocation is a fully constructed Docker CLI invocation. Keeping it as data
-// makes the security-sensitive argument list inspectable in tests.
 type Invocation struct {
 	Binary string
 	Args   []string
 }
 
-// BuildRunInvocation constructs a disposable, interactive Docker command with
-// exactly one host filesystem mount: the temporary session clone at /workspace.
-func BuildRunInvocation(binary, image, workspacePath string, command []string) (Invocation, error) {
+// StateMount is trusted adapter-derived data. BuildRunInvocation validates it
+// again so a future caller cannot turn it into a general mount escape hatch.
+type StateMount struct {
+	Agent, Source, Destination string
+	ReadOnly                   bool
+}
+
+var allowedDestinations = map[string]map[string]bool{
+	"claude":   {"/home/agent/.claude": true},
+	"codex":    {"/home/agent/.codex": true},
+	"opencode": {"/home/agent/.config/opencode": true, "/home/agent/.local/share/opencode": true},
+}
+
+func BuildRunInvocation(binary, image, workspacePath string, command []string, environment []string, selectedAgent string, protectedSources []string, stateMounts []StateMount) (Invocation, error) {
 	if strings.TrimSpace(binary) == "" {
 		return Invocation{}, fmt.Errorf("Docker binary is required")
 	}
@@ -31,39 +41,209 @@ func BuildRunInvocation(binary, image, workspacePath string, command []string) (
 	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
 		return Invocation{}, fmt.Errorf("agent command is required")
 	}
-
-	absoluteWorkspace, err := filepath.Abs(workspacePath)
+	if allowedDestinations[selectedAgent] == nil {
+		return Invocation{}, fmt.Errorf("unsupported state-mount agent %q", selectedAgent)
+	}
+	workspacePath, err := cleanMountSource(workspacePath)
 	if err != nil {
 		return Invocation{}, fmt.Errorf("resolve session workspace path: %w", err)
 	}
-	absoluteWorkspace = filepath.Clean(absoluteWorkspace)
-	// Docker's --mount key/value format uses commas as separators. Rejecting a
-	// comma avoids turning a user-controlled filesystem path into new mount data.
-	if strings.Contains(absoluteWorkspace, ",") {
-		return Invocation{}, fmt.Errorf("session workspace paths containing commas are not supported")
+	args := []string{"run", "--rm", "--interactive", "--tty", "--workdir", workspace, "--mount", mountArgument(workspacePath, workspace, false), "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true"}
+	seen := map[string]bool{workspace: true}
+	for _, value := range environment {
+		if strings.TrimSpace(value) == "" || strings.Contains(value, "\x00") {
+			return Invocation{}, fmt.Errorf("invalid container environment")
+		}
+		args = append(args, "--env", value)
 	}
-
-	args := []string{
-		"run",
-		"--rm",
-		"--interactive",
-		"--tty",
-		"--workdir", workspace,
-		"--mount", "type=bind,src=" + absoluteWorkspace + ",dst=" + workspace,
-		"--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges=true",
-		image,
+	for _, mount := range stateMounts {
+		canonicalSource, err := cleanMountSource(mount.Source)
+		if err != nil {
+			return Invocation{}, fmt.Errorf("invalid state mount source: %w", err)
+		}
+		mount.Source = canonicalSource
+		if err := validateStateMount(selectedAgent, mount, workspacePath, protectedSources, seen); err != nil {
+			return Invocation{}, err
+		}
+		seen[mount.Destination] = true
+		args = append(args, "--mount", mountArgument(mount.Source, mount.Destination, mount.ReadOnly))
 	}
+	args = append(args, image)
 	args = append(args, command...)
 	return Invocation{Binary: binary, Args: args}, nil
 }
 
-// Runner is injectable so tests can verify lifecycle behavior without Docker.
+func cleanMountSource(source string) (string, error) {
+	if strings.TrimSpace(source) == "" {
+		return "", fmt.Errorf("mount source is required")
+	}
+	for _, part := range strings.FieldsFunc(source, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return "", fmt.Errorf("mount sources containing path traversal are not supported")
+		}
+	}
+	abs, err := filepath.Abs(source)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	if strings.Contains(abs, ",") || strings.Contains(abs, "\x00") {
+		return "", fmt.Errorf("mount sources containing commas or NUL are not supported")
+	}
+	return canonicalExistingPath(abs)
+}
+
+func validateStateMount(agent string, mount StateMount, workspacePath string, protectedSources []string, seen map[string]bool) error {
+	if mount.Agent != agent {
+		return fmt.Errorf("state mount for %q cannot be used by %q", mount.Agent, agent)
+	}
+	if !allowedDestinations[agent][mount.Destination] {
+		return fmt.Errorf("state mount destination %q is not allowed for %q", mount.Destination, agent)
+	}
+	if mount.Destination == workspace || seen[mount.Destination] || strings.Contains(mount.Destination, ",") || !strings.HasPrefix(mount.Destination, "/home/agent/") {
+		return fmt.Errorf("invalid or duplicate state mount destination %q", mount.Destination)
+	}
+	source, err := cleanMountSource(mount.Source)
+	if err != nil {
+		return fmt.Errorf("invalid state mount source: %w", err)
+	}
+	socket, socketErr := canonicalExistingPath("/var/run/docker.sock")
+	if socketErr == nil && source == socket {
+		return fmt.Errorf("refusing Docker socket mount")
+	}
+	for _, forbidden := range canonicalStateParents() {
+		if source == forbidden {
+			return fmt.Errorf("refusing host home or generic state-parent mount")
+		}
+	}
+	for name, path := range canonicalAgentStatePaths() {
+		if name == agent || (agent == "opencode" && strings.HasPrefix(name, "opencode-")) {
+			continue
+		}
+		if source == path || isWithin(source, path) || isWithin(path, source) {
+			return fmt.Errorf("state mount source aliases %s state", name)
+		}
+	}
+	seenSources := seen["source:"+source]
+	if seenSources {
+		return fmt.Errorf("duplicate state mount source %q", source)
+	}
+	for destination := range seen {
+		if !strings.HasPrefix(destination, "source:") || destination == "source:"+source {
+			continue
+		}
+		other := strings.TrimPrefix(destination, "source:")
+		if isWithin(source, other) || isWithin(other, source) {
+			return fmt.Errorf("nested state mount sources are not allowed")
+		}
+	}
+	if source == workspacePath || isWithin(source, workspacePath) || isWithin(workspacePath, source) {
+		return fmt.Errorf("state mount source collides with workspace")
+	}
+	for _, protected := range protectedSources {
+		protected, err := cleanMountSource(protected)
+		if err != nil {
+			return fmt.Errorf("invalid protected mount source: %w", err)
+		}
+		if source == protected || isWithin(source, protected) || isWithin(protected, source) {
+			return fmt.Errorf("state mount source collides with protected source repository path")
+		}
+	}
+	seen["source:"+source] = true
+	return nil
+}
+
+func canonicalStateParents() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	xdgConfig := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
+	if xdgConfig == "" {
+		xdgConfig = filepath.Join(home, ".config")
+	}
+	xdgData := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
+	if xdgData == "" {
+		xdgData = filepath.Join(home, ".local", "share")
+	}
+	paths := []string{home, xdgConfig, xdgData, filepath.Join(home, ".local")}
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if canonical, err := canonicalExistingPath(path); err == nil {
+			result = append(result, canonical)
+		}
+	}
+	return result
+}
+
+func canonicalAgentStatePaths() map[string]string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	xdgConfig := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
+	if xdgConfig == "" {
+		xdgConfig = filepath.Join(home, ".config")
+	}
+	xdgData := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
+	if xdgData == "" {
+		xdgData = filepath.Join(home, ".local", "share")
+	}
+	raw := map[string]string{"claude": filepath.Join(home, ".claude"), "codex": filepath.Join(home, ".codex"), "opencode-config": filepath.Join(xdgConfig, "opencode"), "opencode-data": filepath.Join(xdgData, "opencode")}
+	result := make(map[string]string, len(raw))
+	for name, path := range raw {
+		if canonical, err := canonicalExistingPath(path); err == nil {
+			result[name] = canonical
+		}
+	}
+	return result
+}
+
+// canonicalExistingPath resolves symlink aliases even when the terminal path
+// does not yet exist, by resolving its closest existing ancestor.
+func canonicalExistingPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	var suffix []string
+	current := filepath.Clean(abs)
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", err
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
+}
+
+func mountArgument(source, destination string, readOnly bool) string {
+	if readOnly {
+		return "type=bind,src=" + source + ",dst=" + destination + ",readonly"
+	}
+	return "type=bind,src=" + source + ",dst=" + destination
+}
+
+func isWithin(path, parent string) bool {
+	relative, err := filepath.Rel(parent, path)
+	return err == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))))
+}
+
 type Runner interface {
 	Run(context.Context, Invocation) error
 }
 
-// ExecRunner forwards the terminal streams directly to docker run.
 type ExecRunner struct {
 	Stdin  io.Reader
 	Stdout io.Writer
@@ -72,9 +252,7 @@ type ExecRunner struct {
 
 func (r ExecRunner) Run(ctx context.Context, invocation Invocation) error {
 	cmd := exec.CommandContext(ctx, invocation.Binary, invocation.Args...)
-	cmd.Stdin = r.Stdin
-	cmd.Stdout = r.Stdout
-	cmd.Stderr = r.Stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = r.Stdin, r.Stdout, r.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker run: %w", err)
 	}
