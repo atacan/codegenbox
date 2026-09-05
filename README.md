@@ -1,4 +1,4 @@
-# Codegenbox (Phase 3)
+# Codegenbox
 
 Codegenbox runs a coding agent in a disposable Docker container against a
 self-contained Git session clone. Committed work is imported by the trusted
@@ -41,12 +41,55 @@ codegenbox codex
 codegenbox opencode
 codegenbox sessions
 codegenbox resume <session-id>
+codegenbox push <session-id>
+codegenbox compare <session-id>
+codegenbox pr <session-id>
 ```
 
 `codegenbox <agent>` and `codegenbox run <agent>` are equivalent. `sessions`
 prints stable ID/agent/state/workspace/branch records without reading or
 printing credentials. `resume` requires an explicit ID; it never accepts a
 workspace path or silently chooses a session.
+
+## Host GitHub workflow
+
+Once a container has stopped, Codegenbox prints a host-side summary from the
+original repository: repository, recorded base branch and commit, reserved
+session branch, imported commit, commit subjects, and changed-file totals.
+The summary is informational; it never pushes, opens a browser, creates a pull
+request, or merges anything automatically.
+
+After reviewing the summary, push only the generated branch explicitly:
+
+```sh
+codegenbox push <session-id>
+```
+
+The command reads only `origin`'s push URL from the original source repository
+and pushes the fixed refspec
+`refs/heads/codegenbox/<session-id>:refs/heads/codegenbox/<session-id>` without
+force mode. It does not use the retained session clone, update another branch
+or tag, or merge into your current branch. A local/non-GitHub `origin` can be
+pushed, but browser and PR helpers require a standard `github.com` remote.
+
+For a GitHub source remote, open the compare page after pushing:
+
+```sh
+codegenbox compare <session-id>
+```
+
+This prints the exact compare URL and asks the host desktop to open it. To
+create a PR through an authenticated host `gh` installation, push first, then
+run:
+
+```sh
+codegenbox pr <session-id>
+```
+
+`pr` invokes `gh pr create --repo owner/repo --base <recorded-base> --head
+codegenbox/<session-id> --fill`; it never runs in the container and does not
+ask `gh` to push. If `gh` is missing, unauthenticated, or rejects the request,
+the source branch and Codegenbox metadata remain unchanged.
 
 ## Production image
 
@@ -114,6 +157,11 @@ descendant. On resume, that branch is atomically advanced only from the
 recorded imported commit. Main and unrelated refs are untouched. Dirty and
 failed clones are never auto-deleted; committed work is still imported when a
 clone remains dirty.
+
+GitHub credentials, SSH private keys, host Git configuration, and writable
+GitHub authentication state are never mounted into the container. Host Git and
+`gh` operations occur only through the explicit commands above, after the
+agent container has terminated.
 
 ## Manual real-agent persistence check
 

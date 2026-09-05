@@ -1419,6 +1419,20 @@ Success criterion:
 
 > The agent itself never needs GitHub write credentials.
 
+Phase 4 CLI shape:
+
+```text
+codegenbox push <session-id>
+codegenbox compare <session-id>
+codegenbox pr <session-id>
+```
+
+All three commands consume recorded session metadata only after the agent has
+exited. `push` uses the source repository's fixed `origin` push URL and an
+exact non-force `refs/heads/codegenbox/<session-id>` refspec. `compare` opens a
+recognized `github.com` compare page; `pr` is an optional host-`gh` operation
+after the branch has been pushed. Neither command may consult the agent clone.
+
 ---
 
 ## Phase 5 — Private Dependencies

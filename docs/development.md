@@ -1,4 +1,4 @@
-# Phase 3 development notes
+# Development notes
 
 ## Adapter contract
 
@@ -67,6 +67,39 @@ from the recorded base. First import atomically creates the branch; later
 imports atomically advance that same branch only from `ImportedCommit`. A CAS
 failure, source mismatch, or dirty clone preserves the session clone. Committed
 work imports even with remaining dirty files.
+
+## Phase 4 host GitHub workflow
+
+After every normal session return, the CLI reads the original source repository
+on the host and prints its recorded base, reserved branch, imported commit,
+new commit subjects, and `git diff --numstat` totals. Summary collection never
+uses the agent-writable session clone.
+
+`codegenbox push <id>` is deliberately separate from running an agent. It
+loads validated metadata, reads the fixed `origin` push URL only from the
+recorded source repository, and invokes Git directly (no shell) with exactly:
+
+```text
+git ... push --porcelain --no-verify -- <source-origin-push-url> \
+  refs/heads/codegenbox/<id>:refs/heads/codegenbox/<id>
+```
+
+There is no force option, configured remote refspec, agent-provided branch,
+clone remote, hook, or string-interpolated shell command in that path. The
+source repository is validated as its own Git root before remote lookup. A
+failed push leaves the generated local session branch and metadata intact.
+
+`codegenbox compare <id>` recognizes only standard `github.com` HTTPS, SSH, or
+SCP-style origin URLs and opens the generated compare page on the host. It is
+an explicit action. `codegenbox pr <id>` uses a host-installed `gh` only after
+an explicit request, passing fixed `--repo`, `--base`, `--head`, and `--fill`
+arguments derived from validated metadata. Users must push first; Codegenbox
+does not automatically merge or push as part of PR creation.
+
+Do not loosen the Docker mount builder for this feature. Neither host Git
+configuration, GitHub credentials, SSH private keys, nor writable GitHub/`gh`
+state belongs in the container. The existing post-container lifecycle boundary
+is mandatory for every host-side GitHub operation.
 
 ## Colima and manual verification
 
