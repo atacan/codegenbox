@@ -1,5 +1,7 @@
 # Codegenbox
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/atacan/codegenbox)
+
 Codegenbox runs a coding agent in a disposable Docker container against a
 self-contained Git session clone. Committed work is imported by the trusted
 host process only after the container exits; uncommitted work retains its clone
