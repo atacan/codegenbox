@@ -214,6 +214,33 @@ When the container exits, this state disappears.
 
 # 5. Git Worktree Model
 
+## 5.0 Approved Phase 1 clarification — self-contained session clones
+
+The linked-worktree design below cannot satisfy both normal in-container Git
+commands and the security invariant that only the session workspace is mounted:
+a linked worktree's `.git` file points to administrative data in the source
+repository's Git directory, which is correctly unavailable in the container.
+
+Therefore, Phase 1 uses a self-contained temporary **session clone** rather
+than a linked Git worktree. The clone, including its ordinary `.git` directory,
+lives entirely below Codegenbox-owned storage and is the sole bind mount at
+`/workspace`. It is created without local-clone hardlinks or object alternates,
+and its temporary source remote is removed before the agent starts.
+
+The clone creates `codegenbox/<session-id>` locally at the recorded base
+commit. After the agent/container has terminated, the trusted host process
+validates and imports only that fixed ref into the original repository. The
+commit must equal the recorded base or descend from it, and the host atomically
+creates only the reserved session branch. Main, tags, and unrelated refs are
+never updated by this reconciliation. A clean clone is removable only after a
+verified import; a dirty or import-failed clone is always retained.
+
+This clarification supersedes references to a *temporary worktree* in the
+Phase 1 lifecycle, persistence, testing, and success criteria. The metadata
+field named `worktree` remains a compatibility-oriented path field but denotes
+the session workspace. Linked worktrees remain a possible future design only
+if their Git-metadata exposure can be reconciled with the security model.
+
 Codegenbox must not let the coding agent operate directly on the user's normal working tree.
 
 Suppose the user runs:
@@ -1236,8 +1263,8 @@ Implement:
 ```text
 Go CLI skeleton
 Git repository discovery
-session branch creation
-temporary worktree creation
+session branch creation in a self-contained session clone
+temporary session-clone creation
 Docker execution
 interactive TTY
 clean/dirty detection
@@ -1248,7 +1275,7 @@ one agent adapter
 
 Success criterion:
 
-> An agent can edit and commit code in a disposable worktree, exit, and leave only the Git commits behind.
+> An agent can edit and commit code in a self-contained disposable session clone, exit, and leave only the validated Git commits on its Codegenbox branch in the original repository.
 
 ---
 
