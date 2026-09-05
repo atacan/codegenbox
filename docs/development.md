@@ -21,7 +21,7 @@ and OpenCode. Keep OS, toolchain, and agent versions explicit in Docker build
 inputs. Normal agent startup must not run `npx`, install a package, or depend
 on a package registry; the adapter commands above execute installed binaries.
 
-The CLI default is `docker.io/atacandur/codegenbox:0.2.0`.
+The CLI default is `docker.io/atacandur/codegenbox:0.2.1`.
 `CODEGENBOX_IMAGE` remains the only supported image override for a compatible
 local, private, or test image; it must not alter the fixed command or mount
 contract. The published OCI index contains `linux/arm64` and `linux/amd64`
@@ -233,7 +233,11 @@ without credentials or a push; manual publishing requires its explicit
 workflow skips a version only when the existing registry digest exactly
 matches `release/image-digests.txt`; it refuses every other overwrite. Verify
 the successful authenticated workflow run, pull access, and both manifests
-before announcing a later tag.
+before announcing a later tag. The CLI publishing workflow then renders the
+Homebrew formula from its published checksums and atomically updates
+`atacan/homebrew-tap`. It requires the `HOMEBREW_TAP_GITHUB_TOKEN` Actions
+secret: a fine-grained token restricted to that repository with only Contents
+read/write permission.
 
 When changing an OS, toolchain, or agent version, update the pinned build
 input, compatible image tag, and documentation together. Rebuild both

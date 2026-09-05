@@ -11,7 +11,7 @@ import (
 // DefaultImage is the immutable production image release compatible with the
 // 0.2 Go CLI line. Users can select another compatible image with
 // CODEGENBOX_IMAGE.
-const DefaultImage = "docker.io/atacandur/codegenbox:0.2.0"
+const DefaultImage = "docker.io/atacandur/codegenbox:0.2.1"
 
 // Config contains only values that do not add host mounts or agent state.
 type Config struct {

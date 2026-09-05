@@ -133,3 +133,49 @@ jobs:
           gh release create "${GITHUB_REF_NAME}"
           dist/codegenbox_*.tar.gz dist/checksums.txt
           --verify-tag --generate-notes
+
+  publish-homebrew:
+    name: Publish Homebrew formula
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      TAP_REPOSITORY: atacan/homebrew-tap
+      TAP_FORMULA_PATH: Formula/codegenbox.rb
+
+    steps:
+      - name: Check out release tag
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Download published release checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${GITHUB_REF_NAME}" --pattern checksums.txt --dir dist
+
+      - name: Render and validate Homebrew formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/render-homebrew-formula.sh "${GITHUB_REF_NAME#v}" dist/checksums.txt dist/codegenbox.rb
+          ruby -c dist/codegenbox.rb
+
+      - name: Update Homebrew tap atomically
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          formula_sha=$(gh api "repos/${TAP_REPOSITORY}/contents/${TAP_FORMULA_PATH}" --jq .sha)
+          formula_content=$(base64 --wrap=0 dist/codegenbox.rb)
+          gh api --method PUT "repos/${TAP_REPOSITORY}/contents/${TAP_FORMULA_PATH}" \
+            -f message="codegenbox ${GITHUB_REF_NAME#v}" \
+            -f content="${formula_content}" \
+            -f sha="${formula_sha}"
