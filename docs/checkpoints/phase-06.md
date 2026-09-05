@@ -16,8 +16,11 @@ mounts, host Git operations, or recovery targets.
   and legacy volumes, unexpected mounts, and missing required hardening.
 - Image labels are checked before sessions. Legacy unlabelled 0.1 images work;
   a present incompatible label fails closed.
-- Running records contain an owner PID. Dead or legacy records are reconciled
-  using the ordinary validated import/status/cleanup path; live PIDs are skipped.
+- Running records contain an owner PID and unique Docker container name. A dead
+  PID is reconciled only after Docker confirms the named container is stopped
+  or explicitly absent; live, running, uninspectable, and legacy records are preserved.
+- Resume and recovery use a per-session host lock before changing lifecycle
+  metadata, preventing concurrent containers or cleanup for one clone.
 - Cancellation still runs post-exit status/import with a non-cancelled context.
 
 ## Tests
@@ -35,4 +38,5 @@ GitHub, SSH, private repository, or credential live acceptance was run here.
 ## Limitations
 
 Outbound networking and Docker/Colima VM isolation are unchanged. PID reuse is
-inherently platform-dependent; validation/import failures preserve the clone.
+inherently platform-dependent, and unlabelled compatibility is a legacy
+allowance; validation/import failures preserve the clone.

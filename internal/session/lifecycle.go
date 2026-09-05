@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -27,6 +28,7 @@ type Manager struct {
 	PrivateDependencyResolver func() (container.PrivateDependencyAuthorization, error)
 	Limits                    container.ResourceLimits
 	ImageChecker              func(context.Context, string, string) error
+	ContainerStatus           func(context.Context, string, string) (present, running bool, err error)
 	// BeforeCleanup is a test-only synchronization hook. Production leaves it nil.
 	BeforeCleanup func(workspace string)
 }
@@ -112,6 +114,8 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 		StartedAt:     now(),
 		State:         StateRunning,
 		ProcessID:     os.Getpid(),
+		ContainerName: "codegenbox-" + id,
+		DockerBinary:  dockerBinary,
 	}
 	result := Result{Metadata: metadata}
 	if err := WriteMetadata(dataRoot, metadata); err != nil {
@@ -128,7 +132,7 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 	if stateErr != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, stateErr)
 	}
-	invocation, invocationErr := container.BuildRunInvocation(dockerBinary, image, workspace, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, m.Limits, privateDependencies)
+	invocation, invocationErr := container.BuildRunInvocation(dockerBinary, image, workspace, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, m.Limits, container.ContainerName(metadata.ContainerName), privateDependencies)
 	if invocationErr != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, invocationErr)
 	}
@@ -155,9 +159,17 @@ func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Re
 	if err != nil {
 		return Result{}, err
 	}
+	release, err := acquireSessionLock(dataRoot, id)
+	if err != nil {
+		return Result{}, err
+	}
+	defer release()
 	metadata, err := LoadMetadata(dataRoot, id)
 	if err != nil {
 		return Result{}, err
+	}
+	if metadata.State == StateRunning {
+		return Result{Metadata: metadata}, fmt.Errorf("session %q is still running; recover it only after its recorded container has stopped", id)
 	}
 	if err := validateRetainedMetadata(dataRoot, metadata); err != nil {
 		return Result{Metadata: metadata}, err
@@ -182,6 +194,7 @@ func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Re
 	}
 	resumed := now()
 	metadata.State, metadata.LastError, metadata.FinishedAt, metadata.ProcessID = StateRunning, "", nil, os.Getpid()
+	metadata.ContainerName, metadata.DockerBinary = "codegenbox-"+metadata.ID, dockerBinary
 	metadata.LastResumedAt, metadata.ResumeCount = &resumed, metadata.ResumeCount+1
 	result := Result{Metadata: metadata}
 	if err := WriteMetadata(dataRoot, metadata); err != nil {
@@ -195,11 +208,50 @@ func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Re
 	if err != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, err)
 	}
-	invocation, err := container.BuildRunInvocation(dockerBinary, image, metadata.Worktree, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, m.Limits, privateDependencies)
+	invocation, err := container.BuildRunInvocation(dockerBinary, image, metadata.Worktree, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, m.Limits, container.ContainerName(metadata.ContainerName), privateDependencies)
 	if err != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, err)
 	}
 	return m.finish(ctx, dataRoot, repository.Root, result, m.Runner.Run(ctx, invocation))
+}
+
+// acquireSessionLock serializes transitions of one retained clone. Its file
+// contains only the owner PID; a dead lock owner is safely replaced. A reused
+// PID can only conservatively block a resume, never permit concurrent access.
+func acquireSessionLock(dataRoot, id string) (func(), error) {
+	if err := validateID(id); err != nil {
+		return nil, err
+	}
+	directory := filepath.Join(dataRoot, "locks")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return nil, fmt.Errorf("create session lock storage: %w", err)
+	}
+	path := filepath.Join(directory, id+".lock")
+	for attempt := 0; attempt < 2; attempt++ {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_, writeErr := fmt.Fprintf(file, "%d\n", os.Getpid())
+			closeErr := file.Close()
+			if writeErr != nil || closeErr != nil {
+				os.Remove(path)
+				return nil, errors.Join(writeErr, closeErr)
+			}
+			return func() { _ = os.Remove(path) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("acquire session lock: %w", err)
+		}
+		payload, readErr := os.ReadFile(path)
+		var owner int
+		parsed, parseErr := fmt.Sscanf(strings.TrimSpace(string(payload)), "%d", &owner)
+		if readErr != nil || parseErr != nil || parsed != 1 || processAlive(owner) {
+			return nil, fmt.Errorf("session %q is already being resumed or recovered", id)
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("remove stale session lock: %w", err)
+		}
+	}
+	return nil, fmt.Errorf("acquire session lock: concurrent update")
 }
 
 func (m Manager) resolveState(adapter agent.Adapter) ([]container.StateMount, error) {
@@ -340,15 +392,66 @@ func (m Manager) RecoverOrphans(ctx context.Context) ([]Result, error) {
 		if metadata.State != StateRunning || processAlive(metadata.ProcessID) {
 			continue
 		}
+		release, lockErr := acquireSessionLock(dataRoot, metadata.ID)
+		if lockErr != nil {
+			allErr = errors.Join(allErr, fmt.Errorf("recover %s: %w", metadata.ID, lockErr))
+			continue
+		}
+		if metadata.ContainerName == "" || metadata.DockerBinary == "" {
+			allErr = errors.Join(allErr, fmt.Errorf("recover %s: legacy running session cannot be safely verified; clone preserved", metadata.ID))
+			release()
+			continue
+		}
+		present, running, inspectErr := m.containerStatus(ctx, metadata.DockerBinary, metadata.ContainerName)
+		if inspectErr != nil {
+			allErr = errors.Join(allErr, fmt.Errorf("recover %s: inspect recorded container: %w", metadata.ID, inspectErr))
+			release()
+			continue
+		}
+		if present && running {
+			allErr = errors.Join(allErr, fmt.Errorf("recover %s: recorded container is still running; clone preserved", metadata.ID))
+			release()
+			continue
+		}
 		if err := validateRetainedMetadata(dataRoot, metadata); err != nil {
 			allErr = errors.Join(allErr, fmt.Errorf("recover %s: %w", metadata.ID, err))
+			release()
 			continue
 		}
 		result, finishErr := m.finish(ctx, dataRoot, metadata.Repository, Result{Metadata: metadata}, fmt.Errorf("previous Codegenbox process ended before Docker returned"))
 		results = append(results, result)
 		allErr = errors.Join(allErr, finishErr)
+		release()
 	}
 	return results, allErr
+}
+
+func (m Manager) containerStatus(ctx context.Context, binary, name string) (bool, bool, error) {
+	if m.ContainerStatus != nil {
+		return m.ContainerStatus(ctx, binary, name)
+	}
+	output, err := exec.CommandContext(ctx, binary, "container", "inspect", "--format", "{{.State.Running}}", "--", name).CombinedOutput()
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 && definiteContainerNotFound(string(output), name) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	value := strings.TrimSpace(string(output))
+	if value == "true" {
+		return true, true, nil
+	}
+	if value == "false" {
+		return true, false, nil
+	}
+	return false, false, fmt.Errorf("unexpected container state %q", value)
+}
+
+func definiteContainerNotFound(output, name string) bool {
+	// Docker's CLI emits one of these stable English diagnostics for a missing
+	// object. Every other failure (including daemon/context failure) is unsafe
+	// to interpret as absence and therefore blocks recovery.
+	return strings.Contains(output, "No such container: "+name) || strings.Contains(output, "No such object: "+name)
 }
 
 func processAlive(pid int) bool {

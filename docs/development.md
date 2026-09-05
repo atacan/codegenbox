@@ -120,9 +120,13 @@ private storage write probe. It never starts an agent or resolves agent state.
 Image compatibility uses `io.codegenbox.compatibility=1`; unlabelled Phase 3
 0.1 images remain supported, while a present incompatible label is rejected.
 
-Running metadata records the owner PID. At the next start/resume, only a dead
-or absent PID is recovered through the normal safe post-exit lifecycle. A live
-PID is never touched. Dirty clones remain preserved after abrupt host failure.
+Running metadata records the owner PID plus a unique Docker container name.
+At the next start/resume, a dead/absent PID is recovered only after Docker
+confirms that recorded container is stopped or explicitly absent. A live,
+running, or uninspectable container is never touched; legacy running records are retained
+for manual inspection. Dirty clones remain preserved after abrupt host failure.
+Resume and recovery acquire a per-session PID lock before changing metadata, so
+simultaneous processes cannot start or finalize the same clone concurrently.
 
 ## Phase 4 host GitHub workflow
 

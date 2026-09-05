@@ -17,7 +17,13 @@ type Invocation struct {
 	Binary            string
 	Args              []string
 	SecretEnvironment map[string]string
+	auditedArgs       []string
+	auditWorkspace    string
+	auditAgent        string
 }
+
+// ContainerName is host-generated session identity, never agent input.
+type ContainerName string
 
 // ResourceLimits are trusted, parsed host configuration. They are deliberately
 // not command-line options accepted from an agent.
@@ -101,6 +107,7 @@ func BuildRunInvocation(binary, image, workspacePath string, command []string, e
 	}
 	args := []string{"run", "--rm", "--interactive", "--tty", "--user", dockerUser, "--workdir", workspace, "--mount", mountArgument(workspacePath, workspace, false), "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true"}
 	var privateDependencies []PrivateDependencyAuthorization
+	var containerName string
 	for _, option := range options {
 		switch value := option.(type) {
 		case PrivateDependencyAuthorization:
@@ -115,10 +122,21 @@ func BuildRunInvocation(binary, image, workspacePath string, command []string, e
 			if value.CPUs != "" {
 				args = append(args, "--cpus", value.CPUs)
 			}
+		case ContainerName:
+			if containerName != "" || !validContainerName(string(value)) {
+				return Invocation{}, fmt.Errorf("invalid Codegenbox container name")
+			}
+			containerName = string(value)
 		default:
 			return Invocation{}, fmt.Errorf("unsupported Docker invocation option")
 		}
 	}
+	// Direct builder users retain the old API surface; the lifecycle always
+	// supplies a unique recorded name for recoverability.
+	if containerName == "" {
+		containerName = "codegenbox-direct"
+	}
+	args = append(args, "--name", containerName)
 	seen := map[string]bool{workspace: true}
 	for _, value := range environment {
 		if strings.TrimSpace(value) == "" || strings.Contains(value, "\x00") {
@@ -151,7 +169,7 @@ func BuildRunInvocation(binary, image, workspacePath string, command []string, e
 	}
 	args = append(args, image)
 	args = append(args, command...)
-	invocation := Invocation{Binary: binary, Args: args, SecretEnvironment: secretEnvironment}
+	invocation := Invocation{Binary: binary, Args: args, SecretEnvironment: secretEnvironment, auditedArgs: append([]string(nil), args...), auditWorkspace: workspacePath, auditAgent: selectedAgent}
 	if err := AuditInvocation(invocation, workspacePath, selectedAgent); err != nil {
 		return Invocation{}, err
 	}
@@ -165,12 +183,12 @@ func AuditInvocation(invocation Invocation, workspacePath, selectedAgent string)
 	if invocation.Binary == "" || len(invocation.Args) < 2 || invocation.Args[0] != "run" {
 		return fmt.Errorf("invalid Docker invocation")
 	}
-	for index, argument := range invocation.Args {
-		if argument == "--privileged" || strings.HasPrefix(argument, "--privileged=") || argument == "--volume" || argument == "-v" || strings.HasPrefix(argument, "--pid=host") || strings.HasPrefix(argument, "--network=host") {
-			return fmt.Errorf("Docker invocation contains forbidden capability %q", argument)
-		}
-		if (argument == "--pid" || argument == "--network") && index+1 < len(invocation.Args) && invocation.Args[index+1] == "host" {
-			return fmt.Errorf("Docker invocation contains forbidden host namespace")
+	if len(invocation.auditedArgs) == 0 || len(invocation.Args) != len(invocation.auditedArgs) {
+		return fmt.Errorf("Docker invocation was not built by Codegenbox or was modified after audit")
+	}
+	for index := range invocation.Args {
+		if invocation.Args[index] != invocation.auditedArgs[index] {
+			return fmt.Errorf("Docker invocation was modified after audit")
 		}
 	}
 	if !hasArgumentPair(invocation.Args, "--cap-drop", "ALL") || !hasArgumentPair(invocation.Args, "--security-opt", "no-new-privileges=true") || !hasArgument(invocation.Args, "--rm") {
@@ -194,6 +212,17 @@ func validAuditedStateMount(mount, selectedAgent string) bool {
 		return false
 	}
 	return allowedDestinations[selectedAgent][strings.TrimPrefix(parts[2], "dst=")]
+}
+func validContainerName(value string) bool {
+	if !strings.HasPrefix(value, "codegenbox-") || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
 }
 func hasArgument(values []string, want string) bool {
 	for _, value := range values {
@@ -444,6 +473,9 @@ type ExecRunner struct {
 }
 
 func (r ExecRunner) Run(ctx context.Context, invocation Invocation) error {
+	if err := AuditInvocation(invocation, invocation.auditWorkspace, invocation.auditAgent); err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, invocation.Binary, invocation.Args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = r.Stdin, r.Stdout, r.Stderr
 	if len(invocation.SecretEnvironment) != 0 {

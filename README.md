@@ -212,8 +212,9 @@ no-new-privileges; privileged mode, host network/PID namespaces, Docker
 socket, and legacy volume flags are rejected. New images carry
 `io.codegenbox.compatibility=1`; existing unlabelled 0.1 images remain
 supported, while a present incompatible marker is rejected. Dead `running`
-session records are recovered via the same safe import/status logic; dirty
-clones are retained.
+session records are recovered only after the recorded named container is
+confirmed stopped or explicitly reported absent; Docker inspection failures
+leave the clone untouched. Dirty clones are retained.
 
 ## Manual real-agent persistence check
 

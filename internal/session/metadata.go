@@ -39,6 +39,8 @@ type Metadata struct {
 	LastResumedAt  *time.Time `json:"last_resumed_at,omitempty"`
 	ResumeCount    int        `json:"resume_count,omitempty"`
 	ProcessID      int        `json:"process_id,omitempty"`
+	ContainerName  string     `json:"container_name,omitempty"`
+	DockerBinary   string     `json:"docker_binary,omitempty"`
 	State          State      `json:"state"`
 	LastError      string     `json:"last_error,omitempty"`
 }

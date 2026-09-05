@@ -258,18 +258,125 @@ func TestRecoverOrphansPreservesDirtyWorkspaceAndClearsDeadProcess(t *testing.T)
 	if err := gitops.CreateSessionClone(context.Background(), repository, workspace, "codegenbox/"+id, runGit(t, repository, "rev-parse", "HEAD")); err != nil {
 		t.Fatal(err)
 	}
-	metadata := Metadata{ID: id, Repository: repository, Worktree: workspace, Agent: "codex", BaseBranch: "main", BaseCommit: runGit(t, repository, "rev-parse", "HEAD"), SessionBranch: "codegenbox/" + id, State: StateRunning, ProcessID: -1, StartedAt: time.Now()}
+	metadata := Metadata{ID: id, Repository: repository, Worktree: workspace, Agent: "codex", BaseBranch: "main", BaseCommit: runGit(t, repository, "rev-parse", "HEAD"), SessionBranch: "codegenbox/" + id, State: StateRunning, ProcessID: -1, ContainerName: "codegenbox-" + id, DockerBinary: "docker", StartedAt: time.Now()}
 	if err := WriteMetadata(dataRoot, metadata); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(workspace, "keep.txt"), "do not remove")
-	results, err := (Manager{DataRoot: dataRoot}).RecoverOrphans(context.Background())
+	results, err := (Manager{DataRoot: dataRoot, ContainerStatus: func(context.Context, string, string) (bool, bool, error) { return false, false, nil }}).RecoverOrphans(context.Background())
 	if err == nil || len(results) != 1 || results[0].Metadata.State != StateDirty || results[0].Metadata.ProcessID != 0 || results[0].WorkspaceRemoved {
 		t.Fatalf("results=%#v err=%v", results, err)
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "keep.txt")); err != nil {
 		t.Fatalf("dirty orphan was removed: %v", err)
 	}
+}
+
+func TestRecoverOrphansNeverTouchesCloneWhileRecordedContainerRuns(t *testing.T) {
+	repository := newRepository(t)
+	repository, err := filepath.EvalSymlinks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(t.TempDir(), "state")
+	workspaceRoot, err := prepareWorkspaceRoot(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataRoot, err = filepath.EvalSymlinks(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "project-20260903-193012-a82f"
+	workspace := filepath.Join(workspaceRoot, id)
+	base := runGit(t, repository, "rev-parse", "HEAD")
+	if err := gitops.CreateSessionClone(context.Background(), repository, workspace, "codegenbox/"+id, base); err != nil {
+		t.Fatal(err)
+	}
+	metadata := Metadata{ID: id, Repository: repository, Worktree: workspace, Agent: "codex", BaseBranch: "main", BaseCommit: base, SessionBranch: "codegenbox/" + id, State: StateRunning, ProcessID: -1, ContainerName: "codegenbox-" + id, DockerBinary: "docker", StartedAt: time.Now()}
+	if err := WriteMetadata(dataRoot, metadata); err != nil {
+		t.Fatal(err)
+	}
+	results, err := (Manager{DataRoot: dataRoot, ContainerStatus: func(context.Context, string, string) (bool, bool, error) { return true, true, nil }}).RecoverOrphans(context.Background())
+	if err == nil || len(results) != 0 {
+		t.Fatalf("results=%#v err=%v", results, err)
+	}
+	if got := readMetadata(t, dataRoot, id); got.State != StateRunning {
+		t.Fatalf("active session changed: %#v", got)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("active clone touched: %v", err)
+	}
+}
+
+func TestResumeRejectsRunningSessionBeforeItCanTouchWorkspace(t *testing.T) {
+	repository := newRepository(t)
+	repository, err := filepath.EvalSymlinks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(t.TempDir(), "state")
+	workspaceRoot, err := prepareWorkspaceRoot(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataRoot, err = filepath.EvalSymlinks(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "project-20260903-193012-a82f"
+	workspace := filepath.Join(workspaceRoot, id)
+	base := runGit(t, repository, "rev-parse", "HEAD")
+	if err := gitops.CreateSessionClone(context.Background(), repository, workspace, "codegenbox/"+id, base); err != nil {
+		t.Fatal(err)
+	}
+	metadata := Metadata{ID: id, Repository: repository, Worktree: workspace, Agent: "codex", BaseBranch: "main", BaseCommit: base, SessionBranch: "codegenbox/" + id, State: StateRunning, ProcessID: os.Getpid(), ContainerName: "codegenbox-" + id, DockerBinary: "docker", StartedAt: time.Now()}
+	if err := WriteMetadata(dataRoot, metadata); err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	result, err := (Manager{DataRoot: dataRoot, Runner: runnerFunc(func(context.Context, container.Invocation) error { ran = true; return nil })}).Resume(context.Background(), id, "image", "docker")
+	if err == nil || ran || result.Metadata.State != StateRunning {
+		t.Fatalf("result=%#v err=%v ran=%v", result, err, ran)
+	}
+	if got := readMetadata(t, dataRoot, id); got.State != StateRunning {
+		t.Fatalf("running metadata changed: %#v", got)
+	}
+}
+
+func TestDefiniteContainerNotFoundFailsClosed(t *testing.T) {
+	if !definiteContainerNotFound("Error: No such container: codegenbox-example", "codegenbox-example") {
+		t.Fatal("definite missing container not recognized")
+	}
+	for _, output := range []string{"Cannot connect to the Docker daemon", "context deadline exceeded", "Error response from daemon: internal server error"} {
+		if definiteContainerNotFound(output, "codegenbox-example") {
+			t.Fatalf("unsafe absence accepted: %q", output)
+		}
+	}
+}
+
+func TestSessionLockSerializesAndReplacesDeadOwner(t *testing.T) {
+	root := t.TempDir()
+	id := "project-20260903-193012-a82f"
+	release, err := acquireSessionLock(root, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireSessionLock(root, id); err == nil {
+		t.Fatal("concurrent lock acquisition succeeded")
+	}
+	release()
+	if err := os.MkdirAll(filepath.Join(root, "locks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "locks", id+".lock"), []byte("-1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, err = acquireSessionLock(root, id)
+	if err != nil {
+		t.Fatalf("dead lock was not replaced: %v", err)
+	}
+	release()
 }
 
 func TestLifecycleRemovesCleanWorktreeAndRecordsInterruptedDockerRun(t *testing.T) {

@@ -28,8 +28,16 @@ func TestCheckImageCompatibility(t *testing.T) {
 }
 
 func TestAuditInvocationRejectsDangerousAppend(t *testing.T) {
-	invocation := Invocation{Binary: "docker", Args: []string{"run", "--rm", "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--mount", "type=bind,src=/safe,dst=/workspace", "--privileged", "image", "codex"}}
-	if err := AuditInvocation(invocation, "/safe", "codex"); err == nil {
-		t.Fatal("dangerous appended argument accepted")
+	workspace := t.TempDir()
+	invocation, err := BuildRunInvocation("docker", "image", workspace, []string{"codex"}, nil, "codex", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, added := range [][]string{{"--cap-add", "SYS_ADMIN"}, {"--device", "/dev/null"}, {"--security-opt", "seccomp=unconfined"}, {"--mount", "type=bind,src=/host-home,dst=/home/agent/.codex"}} {
+		mutated := invocation
+		mutated.Args = append(append([]string{}, invocation.Args[:len(invocation.Args)-2]...), append(added, invocation.Args[len(invocation.Args)-2:]...)...)
+		if err := AuditInvocation(mutated, workspace, "codex"); err == nil {
+			t.Fatalf("accepted appended %#v", added)
+		}
 	}
 }
