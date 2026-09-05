@@ -14,9 +14,9 @@ func TestAdaptersHaveDistinctCommandsStateAndEnvironment(t *testing.T) {
 		destinations []string
 		environment  []string
 	}{
-		{Claude, []string{"npx", "--yes", "@anthropic-ai/claude-code"}, []string{"/home/agent/.claude"}, []string{"HOME=/home/agent"}},
-		{Codex, []string{"npx", "--yes", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"}, []string{"/home/agent/.codex"}, []string{"CODEX_HOME=/home/agent/.codex", "HOME=/home/agent"}},
-		{OpenCode, []string{"npx", "--yes", "opencode-ai"}, []string{"/home/agent/.config/opencode", "/home/agent/.local/share/opencode"}, []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_DATA_HOME=/home/agent/.local/share"}},
+		{Claude, []string{"claude"}, []string{"/home/agent/.claude"}, []string{"HOME=/home/agent"}},
+		{Codex, []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}, []string{"/home/agent/.codex"}, []string{"CODEX_HOME=/home/agent/.codex", "HOME=/home/agent"}},
+		{OpenCode, []string{"opencode"}, []string{"/home/agent/.config/opencode", "/home/agent/.local/share/opencode"}, []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_DATA_HOME=/home/agent/.local/share"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

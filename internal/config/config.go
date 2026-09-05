@@ -1,4 +1,4 @@
-// Package config provides the small, explicit configuration surface for Phase 1.
+// Package config provides the small, explicit configuration surface for the CLI.
 package config
 
 import (
@@ -8,7 +8,10 @@ import (
 	"strings"
 )
 
-const DefaultImage = "node:22-bookworm"
+// DefaultImage is the immutable production image release compatible with the
+// 0.1 Go CLI line. Users can select another compatible image with
+// CODEGENBOX_IMAGE.
+const DefaultImage = "docker.io/atacandur/codegenbox:0.1.0"
 
 // Config contains only values that do not add host mounts or agent state.
 type Config struct {
@@ -31,7 +34,7 @@ func DefaultDataRoot() (string, error) {
 	return filepath.Abs(filepath.Join(home, ".local", "share", "codegenbox"))
 }
 
-// LoadFromEnv reads the intentionally narrow Phase 1 overrides. The image is
+// LoadFromEnv reads the intentionally narrow configuration overrides. The image is
 // not built or pulled by the CLI; Docker handles image availability when run.
 func LoadFromEnv() (Config, error) {
 	dataRoot := strings.TrimSpace(os.Getenv("CODEGENBOX_DATA_DIR"))

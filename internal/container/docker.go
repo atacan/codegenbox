@@ -18,6 +18,34 @@ type Invocation struct {
 	Args   []string
 }
 
+type hostIdentity struct {
+	uid int
+	gid int
+}
+
+// Docker's numeric --user fields are signed 32-bit IDs. Reject root too:
+// invoking Codegenbox through sudo must not override the image's non-root
+// runtime identity.
+const maxHostID = int64(1<<31 - 1)
+
+// processHostIdentity is deliberately the only source for --user. It reads
+// the identity of this process, rather than accepting a value from a command,
+// environment variable, or other caller-controlled input.
+var processHostIdentity = func() (hostIdentity, error) {
+	identity := hostIdentity{uid: os.Getuid(), gid: os.Getgid()}
+	if identity.uid <= 0 || identity.gid <= 0 || int64(identity.uid) > maxHostID || int64(identity.gid) > maxHostID {
+		return hostIdentity{}, fmt.Errorf("current host UID/GID is unavailable")
+	}
+	return identity, nil
+}
+
+func (identity hostIdentity) dockerUser() (string, error) {
+	if identity.uid <= 0 || identity.gid <= 0 || int64(identity.uid) > maxHostID || int64(identity.gid) > maxHostID {
+		return "", fmt.Errorf("current host UID/GID is invalid")
+	}
+	return fmt.Sprintf("%d:%d", identity.uid, identity.gid), nil
+}
+
 // StateMount is trusted adapter-derived data. BuildRunInvocation validates it
 // again so a future caller cannot turn it into a general mount escape hatch.
 type StateMount struct {
@@ -48,7 +76,15 @@ func BuildRunInvocation(binary, image, workspacePath string, command []string, e
 	if err != nil {
 		return Invocation{}, fmt.Errorf("resolve session workspace path: %w", err)
 	}
-	args := []string{"run", "--rm", "--interactive", "--tty", "--workdir", workspace, "--mount", mountArgument(workspacePath, workspace, false), "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true"}
+	identity, err := processHostIdentity()
+	if err != nil {
+		return Invocation{}, fmt.Errorf("resolve current host identity: %w", err)
+	}
+	dockerUser, err := identity.dockerUser()
+	if err != nil {
+		return Invocation{}, err
+	}
+	args := []string{"run", "--rm", "--interactive", "--tty", "--user", dockerUser, "--workdir", workspace, "--mount", mountArgument(workspacePath, workspace, false), "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true"}
 	seen := map[string]bool{workspace: true}
 	for _, value := range environment {
 		if strings.TrimSpace(value) == "" || strings.Contains(value, "\x00") {

@@ -1,0 +1,173 @@
+name: Validate and publish container image
+
+# Required only to publish:
+# - Actions variable DOCKERHUB_IMAGE: a Docker Hub repository in
+#   "namespace/repository" form. Set it to "atacandur/codegenbox" for the
+#   canonical docker.io/atacandur/codegenbox image.
+# - Actions secret DOCKERHUB_USERNAME: the Docker Hub account allowed to push
+#   that repository.
+# - Actions secret DOCKERHUB_TOKEN: a least-privilege access token with write
+#   access only to that repository.
+#
+# Protect release tags and restrict who can run a manual publishing dispatch.
+# Validation never receives Docker Hub credentials and never pushes an image.
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/image.yml
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable SemVer tag to publish (for example, v0.1.0)
+        required: false
+        type: string
+      publish:
+        description: Publish the validated release tag to Docker Hub
+        required: true
+        default: false
+        type: boolean
+
+# The workflow needs only repository reads. Docker Hub authentication is
+# supplied exclusively to the publishing job.
+permissions:
+  contents: read
+
+concurrency:
+  group: dockerhub-image-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate ${{ matrix.platform }} natively
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out requested source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        # docker/setup-buildx-action v3.11.1
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      - name: Build and smoke-test the native architecture without publishing
+        # docker/build-push-action v6.18.0
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: false
+
+  publish:
+    name: Publish immutable Docker Hub manifest
+    needs: validate
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish == true)
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_REPOSITORY: ${{ vars.DOCKERHUB_IMAGE || 'atacandur/codegenbox' }}
+
+    steps:
+      - name: Check out release source
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release and image configuration
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${IMAGE_REPOSITORY}" =~ ^[a-z0-9]+([._-][a-z0-9]+)*\/[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo "::error::Set DOCKERHUB_IMAGE to a lowercase namespace/repository value."
+            exit 1
+          fi
+
+          if [[ ! "${RELEASE_TAG}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::Release tag must be stable SemVer: vMAJOR.MINOR.PATCH."
+            exit 1
+          fi
+
+          if ! git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+            echo "::error::Publishing requires an existing tag: ${RELEASE_TAG}"
+            exit 1
+          fi
+
+          echo "version=${RELEASE_TAG#v}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU for ARM64 builds
+        # docker/setup-qemu-action v3.6.0
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392
+
+      - name: Set up Docker Buildx
+        # docker/setup-buildx-action v3.11.1
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      - name: Resolve an already-published immutable image
+        id: registry
+        env:
+          IMAGE: ${{ env.IMAGE_REPOSITORY }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_digest=$(awk -v version="${VERSION}" '$1 == version { print $2 }' release/image-digests.txt)
+          if actual=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" 2>/dev/null); then
+            actual_digest=$(awk '$1 == "Digest:" { print $2; exit }' <<<"${actual}")
+            if [[ -z "${expected_digest}" || "${actual_digest}" != "${expected_digest}" ]]; then
+              echo "::error::Refusing existing unrecorded image ${IMAGE}:${VERSION}@${actual_digest}."
+              exit 1
+            fi
+            echo "already-published=true" >> "${GITHUB_OUTPUT}"
+            echo "Verified existing immutable image ${IMAGE}:${VERSION}@${actual_digest}."
+          else
+            echo "already-published=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Log in to Docker Hub
+        if: steps.registry.outputs.already-published != 'true'
+        # docker/login-action v3.4.0
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and publish immutable multi-platform image
+        if: steps.registry.outputs.already-published != 'true'
+        # docker/build-push-action v6.18.0
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ env.IMAGE_REPOSITORY }}:${{ steps.release.outputs.version }}

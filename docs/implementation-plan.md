@@ -1329,6 +1329,78 @@ Success criterion:
 
 > A fresh Mac/Colima installation can pull the image and start Codegenbox without building anything locally.
 
+### Phase 3 delivery contract
+
+Phase 3 replaces the Node proof image, not the isolation model implemented in
+Phases 1 and 2. The image must be general-purpose and repository-independent;
+it must not contain credentials, source code, session data, or a mechanism for
+reaching the host Docker daemon.
+
+The release image must meet all of the following requirements:
+
+1. Use Ubuntu 24.04 LTS and publish one manifest covering `linux/arm64` and
+   `linux/amd64`.
+2. Provide the utilities, compilers, and language toolchains listed in sections
+   13.2–13.4. Each ecosystem must have a practical smoke check, rather than
+   only an installation step.
+3. Expose the selected agent CLIs as installed commands named `claude`,
+   `codex`, and `opencode`. The Phase 2 adapters must invoke those commands
+   directly: agents must never download themselves with `npx` during a normal
+   session.
+4. Make all externally downloaded language/runtime and agent versions explicit
+   Docker build arguments with conservative defaults. A release record must
+   state the resolved values; changing one is an image release, not an
+   untracked rebuild.
+5. Create an unprivileged `agent` account with `/home/agent` as its default
+   home. Codegenbox must launch the container as the validated UID:GID of its
+   host process so host-owned workspace and selected state mounts remain
+   writable without container-startup `chown` or `chmod`. The synthetic home
+   must accommodate that mapped non-root user and remain compatible with the
+   fixed Phase 2 state destinations. Image construction must not add a generic
+   home mount, Docker socket, privilege, capability, or credential mechanism.
+6. Keep the build context deliberately small. In particular, `.git`, local
+   environment files, editor settings, credentials, build outputs, and
+   Codegenbox session data must not enter an image layer.
+7. Make a concrete, immutable release image the CLI default for the compatible
+   0.1 CLI line. `CODEGENBOX_IMAGE` remains the deliberate escape hatch for
+   local testing, private registries, and later compatible releases.
+
+The image build must fail early when an installed tool is unavailable. The
+release workflow must build a multi-platform manifest and must not permit a
+pull-request build to push an image. Docker Hub namespace and authentication
+are deployment configuration, not source-controlled secrets.
+
+### Phase 3 work packages
+
+The work is intentionally divided into non-overlapping deliverables:
+
+| Package | Owned surface | Required result |
+| --- | --- | --- |
+| Production image | `Dockerfile`, `.dockerignore` | Pinned/toolchain-configurable Ubuntu image, non-root default runtime, direct installed agent commands, and small build context. |
+| CLI adoption | `internal/agent`, `internal/config`, `internal/container` and their tests | Direct agent commands, a compatible immutable default image, and trusted host-UID runtime mapping with the existing mount/state boundary unchanged. |
+| Publishing | `.github/workflows/image.yml` | Tag-gated, secret-backed Buildx release of an ARM64/AMD64 manifest and version tags; non-release runs never push. |
+| Documentation and acceptance | README, development notes, Phase 3 checkpoint | Accurate image/runtime usage and an honest manual-release and security-verification checklist. |
+
+Integration order is image → direct CLI adapters → workflow/documentation,
+followed by a clean-tree review and the verification matrix below. An image is
+not considered released merely because its Dockerfile builds locally.
+
+### Phase 3 verification matrix
+
+Before recording Phase 3 as complete, verify the published manifest and both
+platform images. Perform the agent checks with empty, disposable state
+directories; never print, copy, or commit real authentication material.
+
+| Concern | Required evidence |
+| --- | --- |
+| Manifest | Registry inspection shows `linux/arm64` and `linux/amd64` for the immutable release tag. |
+| Image contents | `claude --version`, `codex --version`, `opencode --version`, `node --version`, `pnpm --version`, `python3 --version`, `uv --version`, `go version`, `cargo --version`, `swift --version`, and representative compiler/tool commands succeed in a disposable container. |
+| CLI integration | A fresh local repository reaches each direct agent command through Codegenbox with the production image; no `npx` download occurs. |
+| Runtime identity | The image defaults to unprivileged `agent`; Codegenbox supplies only the validated invoking host UID:GID through Docker's `--user` option, with `HOME=/home/agent`. The process can write its owned source/state mounts without modifying their host ownership; `/workspace` is still supplied only by Codegenbox at run time. |
+| Boundary regression | Docker command construction still has no host-home mount, Docker socket, `--privileged`, or unexpected writable mount. Agent-state mounts remain selected, explicit, and adapter-owned. |
+| Release behavior | A `vX.Y.Z` tag produces only immutable `X.Y.Z`; the workflow refuses to overwrite an existing version. Pull requests and manual validation cannot publish unless the dispatcher explicitly enables publishing. |
+| Pull-first experience | On a fresh Colima installation, `docker pull <release-image>` followed by `codegenbox <agent>` requires no local image build. |
+
 ---
 
 ## Phase 4 — Host GitHub Workflow

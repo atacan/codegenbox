@@ -12,6 +12,7 @@ import (
 	"github.com/codegenbox/codegenbox/internal/config"
 	"github.com/codegenbox/codegenbox/internal/container"
 	"github.com/codegenbox/codegenbox/internal/session"
+	buildversion "github.com/codegenbox/codegenbox/internal/version"
 )
 
 type Environment struct {
@@ -24,6 +25,12 @@ type Environment struct {
 }
 
 func Run(ctx context.Context, arguments []string, environment Environment) error {
+	output := chooseWriter(environment.Stdout, os.Stdout)
+	if len(arguments) == 1 && (arguments[0] == "version" || arguments[0] == "--version") {
+		_, err := fmt.Fprintf(output, "codegenbox %s\n", buildversion.Version)
+		return err
+	}
+
 	loadConfig := environment.Config
 	if loadConfig == nil {
 		loadConfig = config.LoadFromEnv
@@ -41,7 +48,6 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		}
 	}
 
-	output := chooseWriter(environment.Stdout, os.Stdout)
 	manager := session.Manager{DataRoot: configured.DataRoot, Runner: runner}
 	switch {
 	case len(arguments) == 1 && arguments[0] == "sessions":
@@ -99,7 +105,7 @@ func parseArguments(arguments []string) (string, error) {
 			return arguments[1], nil
 		}
 	}
-	return "", fmt.Errorf("usage: codegenbox <agent> | codegenbox run <agent> | codegenbox resume <session-id> | codegenbox sessions\nsupported agents: claude, codex, opencode")
+	return "", fmt.Errorf("usage: codegenbox <agent> | codegenbox run <agent> | codegenbox resume <session-id> | codegenbox sessions | codegenbox version\nsupported agents: claude, codex, opencode")
 }
 
 func printResult(output io.Writer, result session.Result) {

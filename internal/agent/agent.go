@@ -37,22 +37,21 @@ type StateLocation struct {
 	Destination string
 }
 
-// Lookup returns one of the Phase 2 adapters. The proof image remains Node
-// based, so npm-published CLIs are launched with npx until Phase 3 supplies an
-// image with all three commands installed.
+// Lookup returns one of the Phase 3 adapters. The production image installs
+// all three CLI executables, so adapters invoke their fixed commands directly.
 func Lookup(name string) (Adapter, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case Claude:
-		return Adapter{Name: Claude, Command: []string{"npx", "--yes", "@anthropic-ai/claude-code"}, Environment: homeEnvironment(), State: []StateLocation{{Key: "CLAUDE_STATE_DIR", Destination: containerHome + "/.claude"}}, Description: "Runs Claude Code with only ~/.claude state mounted at the synthetic container home."}, nil
+		return Adapter{Name: Claude, Command: []string{"claude"}, Environment: homeEnvironment(), State: []StateLocation{{Key: "CLAUDE_STATE_DIR", Destination: containerHome + "/.claude"}}, Description: "Runs Claude Code with only ~/.claude state mounted at the synthetic container home."}, nil
 	case Codex:
 		environment := homeEnvironment()
 		environment["CODEX_HOME"] = containerHome + "/.codex"
-		return Adapter{Name: Codex, Command: []string{"npx", "--yes", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"}, Environment: environment, State: []StateLocation{{Key: "CODEX_STATE_DIR", Destination: containerHome + "/.codex"}}, Description: "Runs Codex through npx with its current --yolo-compatible bypass mode and only CODEX_HOME state mounted."}, nil
+		return Adapter{Name: Codex, Command: []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}, Environment: environment, State: []StateLocation{{Key: "CODEX_STATE_DIR", Destination: containerHome + "/.codex"}}, Description: "Runs Codex with its intentional container-only bypass mode and only CODEX_HOME state mounted."}, nil
 	case OpenCode:
 		environment := homeEnvironment()
 		environment["XDG_CONFIG_HOME"] = containerHome + "/.config"
 		environment["XDG_DATA_HOME"] = containerHome + "/.local/share"
-		return Adapter{Name: OpenCode, Command: []string{"npx", "--yes", "opencode-ai"}, Environment: environment, State: []StateLocation{{Key: "OPENCODE_CONFIG_DIR", Destination: containerHome + "/.config/opencode"}, {Key: "OPENCODE_DATA_DIR", Destination: containerHome + "/.local/share/opencode"}}, Description: "Runs OpenCode with its explicit XDG config and data directories mounted."}, nil
+		return Adapter{Name: OpenCode, Command: []string{"opencode"}, Environment: environment, State: []StateLocation{{Key: "OPENCODE_CONFIG_DIR", Destination: containerHome + "/.config/opencode"}, {Key: "OPENCODE_DATA_DIR", Destination: containerHome + "/.local/share/opencode"}}, Description: "Runs OpenCode with its explicit XDG config and data directories mounted."}, nil
 	default:
 		return Adapter{}, fmt.Errorf("unsupported agent %q (supported: %s)", name, strings.Join(Supported(), ", "))
 	}

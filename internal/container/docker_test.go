@@ -8,6 +8,7 @@ import (
 )
 
 func TestBuildRunInvocationContainsOnlySelectedAdapterState(t *testing.T) {
+	stubHostIdentity(t, hostIdentity{uid: 501, gid: 20}, nil)
 	workspace, state := filepath.Join(t.TempDir(), "workspace"), filepath.Join(t.TempDir(), "codex")
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
 		t.Fatal(err)
@@ -15,12 +16,13 @@ func TestBuildRunInvocationContainsOnlySelectedAdapterState(t *testing.T) {
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	invocation, err := BuildRunInvocation("docker", "node:22-bookworm", workspace, []string{"npx", "--yes", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"}, []string{"CODEX_HOME=/home/agent/.codex", "HOME=/home/agent"}, "codex", nil, []StateMount{{Agent: "codex", Source: state, Destination: "/home/agent/.codex"}})
+	invocation, err := BuildRunInvocation("docker", "docker.io/atacandur/codegenbox:0.1.0", workspace, []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}, []string{"CODEX_HOME=/home/agent/.codex", "HOME=/home/agent"}, "codex", nil, []StateMount{{Agent: "codex", Source: state, Destination: "/home/agent/.codex"}})
 	if err != nil {
 		t.Fatalf("BuildRunInvocation: %v", err)
 	}
 	assertArgumentPair(t, invocation.Args, "--cap-drop", "ALL")
 	assertArgumentPair(t, invocation.Args, "--security-opt", "no-new-privileges=true")
+	assertArgumentPair(t, invocation.Args, "--user", "501:20")
 	assertArgumentPair(t, invocation.Args, "--workdir", "/workspace")
 	assertContains(t, invocation.Args, "--rm")
 	mounts := valuesAfter(invocation.Args, "--mount")
@@ -43,6 +45,30 @@ func TestBuildRunInvocationContainsOnlySelectedAdapterState(t *testing.T) {
 		if strings.Contains(command, forbidden) {
 			t.Errorf("Docker invocation unexpectedly contains %q: %#v", forbidden, invocation.Args)
 		}
+	}
+}
+
+func TestBuildRunInvocationRejectsUnavailableOrInvalidHostIdentity(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	for _, test := range []struct {
+		name     string
+		identity hostIdentity
+		err      error
+	}{
+		{name: "unavailable", err: os.ErrNotExist},
+		{name: "root UID", identity: hostIdentity{uid: 0, gid: 20}},
+		{name: "root GID", identity: hostIdentity{uid: 501, gid: 0}},
+		{name: "negative UID", identity: hostIdentity{uid: -1, gid: 20}},
+		{name: "negative GID", identity: hostIdentity{uid: 501, gid: -1}},
+		{name: "UID too large", identity: hostIdentity{uid: int(maxHostID + 1), gid: 20}},
+		{name: "GID too large", identity: hostIdentity{uid: 501, gid: int(maxHostID + 1)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stubHostIdentity(t, test.identity, test.err)
+			if _, err := BuildRunInvocation("docker", "image", workspace, []string{"codex"}, nil, "codex", nil, nil); err == nil {
+				t.Fatal("unavailable or invalid host identity was accepted")
+			}
+		})
 	}
 }
 
@@ -171,4 +197,11 @@ func valuesAfter(values []string, flag string) []string {
 		}
 	}
 	return results
+}
+
+func stubHostIdentity(t *testing.T, identity hostIdentity, wantErr error) {
+	t.Helper()
+	original := processHostIdentity
+	processHostIdentity = func() (hostIdentity, error) { return identity, wantErr }
+	t.Cleanup(func() { processHostIdentity = original })
 }

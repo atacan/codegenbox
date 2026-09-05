@@ -10,7 +10,33 @@ import (
 
 	"github.com/codegenbox/codegenbox/internal/config"
 	"github.com/codegenbox/codegenbox/internal/session"
+	buildversion "github.com/codegenbox/codegenbox/internal/version"
 )
+
+func TestVersionDoesNotRequireRuntimeConfiguration(t *testing.T) {
+	original := buildversion.Version
+	buildversion.Version = "0.1.0"
+	t.Cleanup(func() { buildversion.Version = original })
+
+	var output bytes.Buffer
+	configured := false
+	err := Run(context.Background(), []string{"version"}, Environment{
+		Stdout: &output,
+		Config: func() (config.Config, error) {
+			configured = true
+			return config.Config{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured {
+		t.Fatal("version unexpectedly loaded runtime configuration")
+	}
+	if output.String() != "codegenbox 0.1.0\n" {
+		t.Fatalf("version output = %q", output.String())
+	}
+}
 
 func TestSessionsListsNonSensitiveRecordsInStableOrder(t *testing.T) {
 	root := t.TempDir()

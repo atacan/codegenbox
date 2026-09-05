@@ -1,9 +1,33 @@
-# Codegenbox (Phase 2)
+# Codegenbox (Phase 3)
 
 Codegenbox runs a coding agent in a disposable Docker container against a
 self-contained Git session clone. Committed work is imported by the trusted
 host process only after the container exits; uncommitted work retains its clone
 for a safe later resume.
+
+## Install
+
+Codegenbox provides checksum-verified release binaries for macOS and Linux on
+ARM64 and AMD64. Docker (or Colima on macOS) and Git must already be installed.
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/atacan/codegenbox/main/scripts/install.sh
+less install.sh
+sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
+codegenbox version
+```
+
+Set `CODEGENBOX_INSTALL_DIR` to choose another binary directory. The installer
+defaults to release `0.1.0`; set `CODEGENBOX_VERSION` to install a different
+published version. The first agent run pulls the matching public development
+image automatically.
+
+Until the first GitHub CLI release is published, build from this checkout:
+
+```sh
+go build -o "$HOME/.local/bin/codegenbox" ./cmd/codegenbox
+```
 
 ## Use
 
@@ -22,11 +46,33 @@ prints stable ID/agent/state/workspace/branch records without reading or
 printing credentials. `resume` requires an explicit ID; it never accepts a
 workspace path or silently chooses a session.
 
-The Phase 1 proof image remains `node:22-bookworm`. Until Phase 3 supplies a
-production image, adapters execute `npx --yes @anthropic-ai/claude-code`,
-`npx --yes @openai/codex --dangerously-bypass-approvals-and-sandbox`, and
-`npx --yes opencode-ai`. Current Codex CLI replaces Phase 1's `--yolo` spelling
-with this documented equivalent; it remains limited to the isolated container.
+## Production image
+
+The default image is `docker.io/atacandur/codegenbox:0.1.0`. It contains the
+production development environment and installed agent CLIs, so adapters use
+fixed direct commands instead of downloading an agent with `npx` at session
+startup:
+
+| Agent | Container command |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex --dangerously-bypass-approvals-and-sandbox` |
+| OpenCode | `opencode` |
+
+Codex's bypass flag applies only inside Codegenbox's existing container
+boundary; it does not add host mounts or privileges. The published image index
+contains `linux/arm64` and `linux/amd64` variants, allowing Apple Silicon to
+pull the native ARM64 variant. The immutable `0.1.0` index digest is
+`sha256:11b94307b51a73b485d97f826cc50a31958157bd564a1a2899f719a68ade6170`.
+
+Set `CODEGENBOX_IMAGE` to use a compatible local, private, or test image:
+
+```sh
+CODEGENBOX_IMAGE=registry.example/codegenbox:test codegenbox codex
+```
+
+The default tag is publicly pullable from Docker Hub. Codegenbox does not
+build or publish images during a normal session.
 
 ## Persistent agent state
 

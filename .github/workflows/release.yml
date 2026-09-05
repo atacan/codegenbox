@@ -1,0 +1,135 @@
+name: Publish CLI release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test release source
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out release tag
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        # actions/setup-go v6.0.0
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run Go checks
+        run: |
+          go test ./...
+          go test -race ./...
+          go vet ./...
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - darwin/arm64
+          - darwin/amd64
+          - linux/arm64
+          - linux/amd64
+
+    steps:
+      - name: Check out release tag
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        # actions/setup-go v6.0.0
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Validate stable release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must be stable SemVer: vMAJOR.MINOR.PATCH."
+            exit 1
+          fi
+
+      - name: Build release archive
+        shell: bash
+        run: scripts/build-release.sh "${GITHUB_REF_NAME#v}" "${{ matrix.target }}"
+
+      - name: Upload release archive
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: codegenbox-${{ strategy.job-index }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out release tag
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Download release archives
+        # actions/download-artifact v6.0.0
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum codegenbox_*.tar.gz | sort --key=2 > checksums.txt
+
+      - name: Refuse to overwrite an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "::error::Refusing to overwrite existing release ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+
+      - name: Publish immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          dist/codegenbox_*.tar.gz dist/checksums.txt
+          --verify-tag --generate-notes

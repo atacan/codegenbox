@@ -1,0 +1,7 @@
+# This image is fully assembled from vendor artifacts and never needs source
+# files from the build context.  Keeping the context to these two files avoids
+# accidentally sending repository history, agent state, or credentials to the
+# Docker daemon (including a remote builder).
+**
+!Dockerfile
+!.dockerignore
