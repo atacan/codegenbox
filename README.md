@@ -28,7 +28,7 @@ codegenbox version
 ```
 
 Set `CODEGENBOX_INSTALL_DIR` to choose another binary directory. The installer
-defaults to release `0.2.1`; set `CODEGENBOX_VERSION` to install a different
+defaults to release `0.2.2`; set `CODEGENBOX_VERSION` to install a different
 published version. The first agent run pulls the matching public development
 image automatically.
 
@@ -94,7 +94,7 @@ the source branch and Codegenbox metadata remain unchanged.
 
 ## Production image
 
-The default image is `docker.io/atacandur/codegenbox:0.2.1`. It contains the
+The default image is `docker.io/atacandur/codegenbox:0.2.2`. It contains the
 production development environment and installed agent CLIs, so adapters use
 fixed direct commands instead of downloading an agent with `npx` at session
 startup:

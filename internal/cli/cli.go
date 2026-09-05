@@ -57,7 +57,7 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 	imageChecker := environment.ImageChecker
 	if imageChecker == nil && usingDefaultRunner {
 		imageChecker = func(ctx context.Context, binary, image string) error {
-			return container.CheckImageCompatibility(ctx, container.ExecInspector{}, binary, image)
+			return container.EnsureImageCompatibility(ctx, container.ExecInspector{}, binary, image)
 		}
 	}
 	manager := session.Manager{DataRoot: configured.DataRoot, Runner: runner, Limits: container.ResourceLimits{PIDs: configured.Limits.PIDs, Memory: configured.Limits.Memory, CPUs: configured.Limits.CPUs}, ImageChecker: imageChecker}

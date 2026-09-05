@@ -3,6 +3,8 @@ package container
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +24,41 @@ func TestCheckImageCompatibility(t *testing.T) {
 			err := CheckImageCompatibility(context.Background(), inspectFunc(func(context.Context, string, ...string) (string, error) { return test.value, test.err }), "docker", "image:test")
 			if (err != nil) != test.wantErr {
 				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestEnsureImageCompatibilityPullsOnlyWhenImageIsMissing(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		inspectErr error
+		wantPull   bool
+		wantErr    bool
+	}{
+		{name: "already available"},
+		{name: "missing", inspectErr: errors.New("exit status 1: Error response from daemon: No such image: image:test"), wantPull: true},
+		{name: "daemon unavailable", inspectErr: errors.New("exit status 1: Cannot connect to the Docker daemon"), wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls []string
+			inspector := inspectFunc(func(_ context.Context, _ string, args ...string) (string, error) {
+				calls = append(calls, strings.Join(args, " "))
+				if strings.Contains(strings.Join(args, " "), "image inspect") && len(calls) == 1 && test.inspectErr != nil {
+					return test.inspectErr.Error(), test.inspectErr
+				}
+				return "1\n", nil
+			})
+			err := EnsureImageCompatibility(context.Background(), inspector, "docker", "image:test")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("EnsureImageCompatibility error = %v", err)
+			}
+			gotPull := false
+			for _, call := range calls {
+				gotPull = gotPull || strings.Contains(call, "image pull")
+			}
+			if gotPull != test.wantPull {
+				t.Fatalf("pull called = %v, calls = %s", gotPull, fmt.Sprintf("%q", calls))
 			}
 		})
 	}

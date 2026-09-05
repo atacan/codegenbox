@@ -35,7 +35,7 @@ func TestLoadFromEnvUsesDefaultProductionImage(t *testing.T) {
 	if configured.Image != DefaultImage {
 		t.Fatalf("Image = %q, want default %q", configured.Image, DefaultImage)
 	}
-	if DefaultImage != "docker.io/atacandur/codegenbox:0.2.1" {
+	if DefaultImage != "docker.io/atacandur/codegenbox:0.2.2" {
 		t.Fatalf("DefaultImage = %q, want immutable production image tag", DefaultImage)
 	}
 }

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-install_version=${CODEGENBOX_VERSION:-0.2.1}
+install_version=${CODEGENBOX_VERSION:-0.2.2}
 install_repository=${CODEGENBOX_GITHUB_REPOSITORY:-atacan/codegenbox}
 
 if ! printf '%s\n' "$install_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
