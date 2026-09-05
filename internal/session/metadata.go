@@ -38,6 +38,7 @@ type Metadata struct {
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 	LastResumedAt  *time.Time `json:"last_resumed_at,omitempty"`
 	ResumeCount    int        `json:"resume_count,omitempty"`
+	ProcessID      int        `json:"process_id,omitempty"`
 	State          State      `json:"state"`
 	LastError      string     `json:"last_error,omitempty"`
 }

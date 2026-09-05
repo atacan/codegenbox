@@ -19,6 +19,13 @@ type Invocation struct {
 	SecretEnvironment map[string]string
 }
 
+// ResourceLimits are trusted, parsed host configuration. They are deliberately
+// not command-line options accepted from an agent.
+type ResourceLimits struct {
+	PIDs         int
+	Memory, CPUs string
+}
+
 // PrivateDependencyAuthorization is deliberately limited to a separate,
 // read-only GitHub dependency token. It is not a host GitHub/gh credential and
 // it is never serialized or added to Docker command arguments.
@@ -67,7 +74,7 @@ var allowedDestinations = map[string]map[string]bool{
 	"opencode": {"/home/agent/.config/opencode": true, "/home/agent/.local/share/opencode": true},
 }
 
-func BuildRunInvocation(binary, image, workspacePath string, command []string, environment []string, selectedAgent string, protectedSources []string, stateMounts []StateMount, privateDependencies ...PrivateDependencyAuthorization) (Invocation, error) {
+func BuildRunInvocation(binary, image, workspacePath string, command []string, environment []string, selectedAgent string, protectedSources []string, stateMounts []StateMount, options ...any) (Invocation, error) {
 	if strings.TrimSpace(binary) == "" {
 		return Invocation{}, fmt.Errorf("Docker binary is required")
 	}
@@ -93,6 +100,25 @@ func BuildRunInvocation(binary, image, workspacePath string, command []string, e
 		return Invocation{}, err
 	}
 	args := []string{"run", "--rm", "--interactive", "--tty", "--user", dockerUser, "--workdir", workspace, "--mount", mountArgument(workspacePath, workspace, false), "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true"}
+	var privateDependencies []PrivateDependencyAuthorization
+	for _, option := range options {
+		switch value := option.(type) {
+		case PrivateDependencyAuthorization:
+			privateDependencies = append(privateDependencies, value)
+		case ResourceLimits:
+			if value.PIDs > 0 {
+				args = append(args, "--pids-limit", fmt.Sprintf("%d", value.PIDs))
+			}
+			if value.Memory != "" {
+				args = append(args, "--memory", value.Memory)
+			}
+			if value.CPUs != "" {
+				args = append(args, "--cpus", value.CPUs)
+			}
+		default:
+			return Invocation{}, fmt.Errorf("unsupported Docker invocation option")
+		}
+	}
 	seen := map[string]bool{workspace: true}
 	for _, value := range environment {
 		if strings.TrimSpace(value) == "" || strings.Contains(value, "\x00") {
@@ -125,7 +151,74 @@ func BuildRunInvocation(binary, image, workspacePath string, command []string, e
 	}
 	args = append(args, image)
 	args = append(args, command...)
-	return Invocation{Binary: binary, Args: args, SecretEnvironment: secretEnvironment}, nil
+	invocation := Invocation{Binary: binary, Args: args, SecretEnvironment: secretEnvironment}
+	if err := AuditInvocation(invocation, workspacePath, selectedAgent); err != nil {
+		return Invocation{}, err
+	}
+	return invocation, nil
+}
+
+// AuditInvocation is a defense-in-depth assertion over the final Docker argv.
+// It is intentionally independent of construction so tests and future callers
+// cannot bypass the security contract by appending arguments later.
+func AuditInvocation(invocation Invocation, workspacePath, selectedAgent string) error {
+	if invocation.Binary == "" || len(invocation.Args) < 2 || invocation.Args[0] != "run" {
+		return fmt.Errorf("invalid Docker invocation")
+	}
+	for index, argument := range invocation.Args {
+		if argument == "--privileged" || strings.HasPrefix(argument, "--privileged=") || argument == "--volume" || argument == "-v" || strings.HasPrefix(argument, "--pid=host") || strings.HasPrefix(argument, "--network=host") {
+			return fmt.Errorf("Docker invocation contains forbidden capability %q", argument)
+		}
+		if (argument == "--pid" || argument == "--network") && index+1 < len(invocation.Args) && invocation.Args[index+1] == "host" {
+			return fmt.Errorf("Docker invocation contains forbidden host namespace")
+		}
+	}
+	if !hasArgumentPair(invocation.Args, "--cap-drop", "ALL") || !hasArgumentPair(invocation.Args, "--security-opt", "no-new-privileges=true") || !hasArgument(invocation.Args, "--rm") {
+		return fmt.Errorf("Docker invocation is missing required hardening")
+	}
+	mounts := valuesAfterFlag(invocation.Args, "--mount")
+	if len(mounts) < 1 || mounts[0] != mountArgument(workspacePath, workspace, false) {
+		return fmt.Errorf("Docker invocation does not mount only the validated workspace at %s", workspace)
+	}
+	for _, mount := range mounts[1:] {
+		if strings.Contains(mount, "/var/run/docker.sock") || !validAuditedStateMount(mount, selectedAgent) {
+			return fmt.Errorf("Docker invocation has an unexpected host mount")
+		}
+	}
+	return nil
+}
+
+func validAuditedStateMount(mount, selectedAgent string) bool {
+	parts := strings.Split(mount, ",")
+	if len(parts) < 3 || parts[0] != "type=bind" || !strings.HasPrefix(parts[1], "src=") || parts[1] == "src=" || !strings.HasPrefix(parts[2], "dst=") {
+		return false
+	}
+	return allowedDestinations[selectedAgent][strings.TrimPrefix(parts[2], "dst=")]
+}
+func hasArgument(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+func hasArgumentPair(values []string, flag, want string) bool {
+	for i := 0; i+1 < len(values); i++ {
+		if values[i] == flag && values[i+1] == want {
+			return true
+		}
+	}
+	return false
+}
+func valuesAfterFlag(values []string, flag string) []string {
+	var result []string
+	for i := 0; i+1 < len(values); i++ {
+		if values[i] == flag {
+			result = append(result, values[i+1])
+		}
+	}
+	return result
 }
 
 // addPrivateDependencyAuthorization configures Git only inside the disposable

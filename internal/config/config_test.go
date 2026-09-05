@@ -39,3 +39,9 @@ func TestLoadFromEnvUsesDefaultProductionImage(t *testing.T) {
 		t.Fatalf("DefaultImage = %q, want immutable production image tag", DefaultImage)
 	}
 }
+
+func TestLoadFromEnvParsesOptionalResourceLimits(t *testing.T) {
+	t.Setenv("CODEGENBOX_PIDS_LIMIT", "256"); t.Setenv("CODEGENBOX_MEMORY_LIMIT", "2g"); t.Setenv("CODEGENBOX_CPUS_LIMIT", "1.5")
+	configured, err := LoadFromEnv(); if err != nil || configured.Limits.PIDs != 256 || configured.Limits.Memory != "2g" || configured.Limits.CPUs != "1.5" { t.Fatalf("limits = %#v, %v", configured.Limits, err) }
+	t.Setenv("CODEGENBOX_PIDS_LIMIT", "0"); if _, err := LoadFromEnv(); err == nil { t.Fatal("zero pids limit accepted") }
+}

@@ -106,6 +106,24 @@ imports atomically advance that same branch only from `ImportedCommit`. A CAS
 failure, source mismatch, or dirty clone preserves the session clone. Committed
 work imports even with remaining dirty files.
 
+## Phase 6 hardening
+
+The final Docker argv is audited after construction and before `docker run`.
+It rejects privileged/host namespace settings, Docker socket and legacy-volume
+syntax, unexpected mounts, and missing `--rm`, capability-drop, or
+no-new-privileges settings. Optional PID, memory, and CPU limits are parsed
+only from Codegenbox environment settings; agent input never supplies Docker
+options.
+
+`doctor` runs only Git/Docker version and info commands, image inspect, and a
+private storage write probe. It never starts an agent or resolves agent state.
+Image compatibility uses `io.codegenbox.compatibility=1`; unlabelled Phase 3
+0.1 images remain supported, while a present incompatible label is rejected.
+
+Running metadata records the owner PID. At the next start/resume, only a dead
+or absent PID is recovered through the normal safe post-exit lifecycle. A live
+PID is never touched. Dirty clones remain preserved after abrupt host failure.
+
 ## Phase 4 host GitHub workflow
 
 After every normal session return, the CLI reads the original source repository

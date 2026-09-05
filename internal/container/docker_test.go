@@ -49,6 +49,21 @@ func TestBuildRunInvocationContainsOnlySelectedAdapterState(t *testing.T) {
 	}
 }
 
+func TestBuildRunInvocationAddsOnlyValidatedResourceLimitFlags(t *testing.T) {
+	stubHostIdentity(t, hostIdentity{uid: 501, gid: 20}, nil)
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := BuildRunInvocation("docker", "image", workspace, []string{"codex"}, nil, "codex", nil, nil, ResourceLimits{PIDs: 128, Memory: "1g", CPUs: "1.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertArgumentPair(t, invocation.Args, "--pids-limit", "128")
+	assertArgumentPair(t, invocation.Args, "--memory", "1g")
+	assertArgumentPair(t, invocation.Args, "--cpus", "1.5")
+}
+
 func TestBuildRunInvocationForwardsOnlyDedicatedReadTokenWithoutCredentialsOrExtraMounts(t *testing.T) {
 	stubHostIdentity(t, hostIdentity{uid: 501, gid: 20}, nil)
 	base := t.TempDir()

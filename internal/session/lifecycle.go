@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/codegenbox/codegenbox/internal/agent"
@@ -24,6 +25,8 @@ type Manager struct {
 	NewID                     func(repository string, now time.Time) (string, error)
 	StateResolver             func(agent.Adapter) ([]container.StateMount, error)
 	PrivateDependencyResolver func() (container.PrivateDependencyAuthorization, error)
+	Limits                    container.ResourceLimits
+	ImageChecker              func(context.Context, string, string) error
 	// BeforeCleanup is a test-only synchronization hook. Production leaves it nil.
 	BeforeCleanup func(workspace string)
 }
@@ -41,6 +44,11 @@ type Result struct {
 func (m Manager) Start(ctx context.Context, workingDirectory string, adapter agent.Adapter, image, dockerBinary string) (Result, error) {
 	if m.Runner == nil {
 		return Result{}, fmt.Errorf("Docker runner is required")
+	}
+	if m.ImageChecker != nil {
+		if err := m.ImageChecker(ctx, dockerBinary, image); err != nil {
+			return Result{}, err
+		}
 	}
 	now := m.Now
 	if now == nil {
@@ -103,6 +111,7 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 		SessionBranch: branch,
 		StartedAt:     now(),
 		State:         StateRunning,
+		ProcessID:     os.Getpid(),
 	}
 	result := Result{Metadata: metadata}
 	if err := WriteMetadata(dataRoot, metadata); err != nil {
@@ -119,7 +128,7 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 	if stateErr != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, stateErr)
 	}
-	invocation, invocationErr := container.BuildRunInvocation(dockerBinary, image, workspace, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, privateDependencies)
+	invocation, invocationErr := container.BuildRunInvocation(dockerBinary, image, workspace, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, m.Limits, privateDependencies)
 	if invocationErr != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, invocationErr)
 	}
@@ -133,6 +142,11 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Result, error) {
 	if m.Runner == nil {
 		return Result{}, fmt.Errorf("Docker runner is required")
+	}
+	if m.ImageChecker != nil {
+		if err := m.ImageChecker(ctx, dockerBinary, image); err != nil {
+			return Result{}, err
+		}
 	}
 	if err := validateID(id); err != nil {
 		return Result{}, err
@@ -167,7 +181,7 @@ func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Re
 		now = time.Now
 	}
 	resumed := now()
-	metadata.State, metadata.LastError, metadata.FinishedAt = StateRunning, "", nil
+	metadata.State, metadata.LastError, metadata.FinishedAt, metadata.ProcessID = StateRunning, "", nil, os.Getpid()
 	metadata.LastResumedAt, metadata.ResumeCount = &resumed, metadata.ResumeCount+1
 	result := Result{Metadata: metadata}
 	if err := WriteMetadata(dataRoot, metadata); err != nil {
@@ -181,7 +195,7 @@ func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Re
 	if err != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, err)
 	}
-	invocation, err := container.BuildRunInvocation(dockerBinary, image, metadata.Worktree, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, privateDependencies)
+	invocation, err := container.BuildRunInvocation(dockerBinary, image, metadata.Worktree, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, m.Limits, privateDependencies)
 	if err != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, err)
 	}
@@ -212,6 +226,7 @@ func (m Manager) finish(ctx context.Context, dataRoot, repositoryRoot string, re
 	}
 	finishedAt := now()
 	metadata.FinishedAt = &finishedAt
+	metadata.ProcessID = 0
 
 	// A cancelled execution context must not skip post-container safety checks.
 	// Runner.Run has returned; all remaining commands are local and bounded.
@@ -304,6 +319,47 @@ func (m Manager) finish(ctx context.Context, dataRoot, repositoryRoot string, re
 		return result, runErr
 	}
 	return result, nil
+}
+
+// RecoverOrphans reconciles only sessions recorded as running by a process
+// that is no longer alive. It uses the same post-container import and cleanup
+// path as a returned runner, so dirty work is preserved and only the reserved
+// branch can be imported. A live PID is never touched.
+func (m Manager) RecoverOrphans(ctx context.Context) ([]Result, error) {
+	dataRoot, err := prepareDataRootWithoutRepository(m.DataRoot)
+	if err != nil {
+		return nil, err
+	}
+	items, err := ListMetadata(dataRoot)
+	if err != nil {
+		return nil, err
+	}
+	var results []Result
+	var allErr error
+	for _, metadata := range items {
+		if metadata.State != StateRunning || processAlive(metadata.ProcessID) {
+			continue
+		}
+		if err := validateRetainedMetadata(dataRoot, metadata); err != nil {
+			allErr = errors.Join(allErr, fmt.Errorf("recover %s: %w", metadata.ID, err))
+			continue
+		}
+		result, finishErr := m.finish(ctx, dataRoot, metadata.Repository, Result{Metadata: metadata}, fmt.Errorf("previous Codegenbox process ended before Docker returned"))
+		results = append(results, result)
+		allErr = errors.Join(allErr, finishErr)
+	}
+	return results, allErr
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return process.Signal(syscall.Signal(0)) == nil
 }
 
 func prepareWorkspaceRoot(dataRoot string) (string, error) {

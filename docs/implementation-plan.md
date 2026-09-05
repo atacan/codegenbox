@@ -1479,6 +1479,11 @@ better crash handling
 image compatibility checking
 ```
 
+Approved implementation clarification: image compatibility is an OCI label
+(`io.codegenbox.compatibility=1`) inspected by the host before a session.
+Unlabelled Phase 3 `0.1` images remain accepted for backward compatibility;
+once the label is present, a mismatched value is rejected.
+
 ---
 
 # 27. Explicitly Out of Scope for V1

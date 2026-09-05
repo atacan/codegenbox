@@ -14,6 +14,7 @@ import (
 
 	"github.com/codegenbox/codegenbox/internal/agent"
 	"github.com/codegenbox/codegenbox/internal/container"
+	gitops "github.com/codegenbox/codegenbox/internal/git"
 )
 
 type runnerFunc func(context.Context, container.Invocation) error
@@ -234,6 +235,40 @@ func TestLifecycleInspectsDirtyWorktreeAfterExecutionContextCancellation(t *test
 	}
 	if got := runGit(t, repository, "rev-parse", "main"); got != mainBefore {
 		t.Fatalf("cancellation changed main from %s to %s", mainBefore, got)
+	}
+}
+
+func TestRecoverOrphansPreservesDirtyWorkspaceAndClearsDeadProcess(t *testing.T) {
+	repository := newRepository(t)
+	repository, err := filepath.EvalSymlinks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(t.TempDir(), "state")
+	workspaceRoot, err := prepareWorkspaceRoot(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "project-20260903-193012-a82f"
+	dataRoot, err = filepath.EvalSymlinks(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(workspaceRoot, id)
+	if err := gitops.CreateSessionClone(context.Background(), repository, workspace, "codegenbox/"+id, runGit(t, repository, "rev-parse", "HEAD")); err != nil {
+		t.Fatal(err)
+	}
+	metadata := Metadata{ID: id, Repository: repository, Worktree: workspace, Agent: "codex", BaseBranch: "main", BaseCommit: runGit(t, repository, "rev-parse", "HEAD"), SessionBranch: "codegenbox/" + id, State: StateRunning, ProcessID: -1, StartedAt: time.Now()}
+	if err := WriteMetadata(dataRoot, metadata); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(workspace, "keep.txt"), "do not remove")
+	results, err := (Manager{DataRoot: dataRoot}).RecoverOrphans(context.Background())
+	if err == nil || len(results) != 1 || results[0].Metadata.State != StateDirty || results[0].Metadata.ProcessID != 0 || results[0].WorkspaceRemoved {
+		t.Fatalf("results=%#v err=%v", results, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "keep.txt")); err != nil {
+		t.Fatalf("dirty orphan was removed: %v", err)
 	}
 }
 

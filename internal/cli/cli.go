@@ -11,6 +11,7 @@ import (
 	"github.com/codegenbox/codegenbox/internal/agent"
 	"github.com/codegenbox/codegenbox/internal/config"
 	"github.com/codegenbox/codegenbox/internal/container"
+	"github.com/codegenbox/codegenbox/internal/doctor"
 	"github.com/codegenbox/codegenbox/internal/host"
 	"github.com/codegenbox/codegenbox/internal/session"
 	buildversion "github.com/codegenbox/codegenbox/internal/version"
@@ -23,6 +24,9 @@ type Environment struct {
 	Getwd  func() (string, error)
 	Config func() (config.Config, error)
 	Runner container.Runner
+	// ImageChecker lets tests replace the host Docker inspection. Production
+	// leaves it nil and uses the real inspector below.
+	ImageChecker func(context.Context, string, string) error
 }
 
 func Run(ctx context.Context, arguments []string, environment Environment) error {
@@ -41,6 +45,7 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		return err
 	}
 	runner := environment.Runner
+	usingDefaultRunner := runner == nil
 	if runner == nil {
 		runner = container.ExecRunner{
 			Stdin:  chooseReader(environment.Stdin, os.Stdin),
@@ -49,8 +54,30 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		}
 	}
 
-	manager := session.Manager{DataRoot: configured.DataRoot, Runner: runner}
+	imageChecker := environment.ImageChecker
+	if imageChecker == nil && usingDefaultRunner {
+		imageChecker = func(ctx context.Context, binary, image string) error {
+			return container.CheckImageCompatibility(ctx, container.ExecInspector{}, binary, image)
+		}
+	}
+	manager := session.Manager{DataRoot: configured.DataRoot, Runner: runner, Limits: container.ResourceLimits{PIDs: configured.Limits.PIDs, Memory: configured.Limits.Memory, CPUs: configured.Limits.CPUs}, ImageChecker: imageChecker}
 	switch {
+	case len(arguments) == 1 && arguments[0] == "doctor":
+		checks := doctor.Run(ctx, doctor.ExecCommand{}, configured.DockerBinary, configured.Image, configured.DataRoot)
+		failed := false
+		for _, check := range checks {
+			if check.Err != nil {
+				failed = true
+				fmt.Fprintf(output, "✗ %s: %v\n", check.Name, check.Err)
+			} else {
+				fmt.Fprintf(output, "✓ %s\n", check.Name)
+			}
+		}
+		if failed {
+			return fmt.Errorf("Codegenbox is not ready")
+		}
+		_, err := fmt.Fprintln(output, "Codegenbox is ready.")
+		return err
 	case len(arguments) == 1 && arguments[0] == "sessions":
 		return printSessions(output, configured.DataRoot)
 	case len(arguments) == 2 && arguments[0] == "push":
@@ -104,6 +131,9 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		if len(arguments) != 2 || arguments[1] == "" {
 			return fmt.Errorf("usage: codegenbox resume <session-id>")
 		}
+		if _, err := manager.RecoverOrphans(ctx); err != nil {
+			return fmt.Errorf("recover interrupted sessions: %w", err)
+		}
 		result, runErr := manager.Resume(ctx, arguments[1], configured.Image, configured.DockerBinary)
 		if result.Metadata.ID != "" {
 			printResult(ctx, output, result)
@@ -133,6 +163,9 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		if err != nil {
 			return fmt.Errorf("resolve current directory: %w", err)
 		}
+		if _, err := manager.RecoverOrphans(ctx); err != nil {
+			return fmt.Errorf("recover interrupted sessions: %w", err)
+		}
 		result, runErr := manager.Start(ctx, workingDirectory, adapter, configured.Image, configured.DockerBinary)
 		if result.Metadata.ID != "" {
 			printResult(ctx, output, result)
@@ -153,7 +186,7 @@ func parseArguments(arguments []string) (string, error) {
 			return arguments[1], nil
 		}
 	}
-	return "", fmt.Errorf("usage: codegenbox <agent> | codegenbox run <agent> | codegenbox resume <session-id> | codegenbox sessions | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode")
+	return "", fmt.Errorf("usage: codegenbox <agent> | codegenbox run <agent> | codegenbox resume <session-id> | codegenbox sessions | codegenbox doctor | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode")
 }
 
 func printResult(ctx context.Context, output io.Writer, result session.Result) {

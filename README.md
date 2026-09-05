@@ -44,6 +44,7 @@ codegenbox resume <session-id>
 codegenbox push <session-id>
 codegenbox compare <session-id>
 codegenbox pr <session-id>
+codegenbox doctor
 ```
 
 `codegenbox <agent>` and `codegenbox run <agent>` are equivalent. `sessions`
@@ -194,6 +195,25 @@ exception is the explicitly supplied, separate, read-only private-dependency
 token described above; it is not a host GitHub credential and never enables
 GitHub writes. Host Git and `gh` operations occur only through the explicit
 commands above, after the agent container has terminated.
+
+## Hardening and diagnostics
+
+`codegenbox doctor` checks Git, the Docker CLI and daemon, the configured
+image compatibility marker, and Codegenbox storage writability. It does not
+start a container or inspect agent state/credentials.
+
+Optional container limits use `CODEGENBOX_PIDS_LIMIT`,
+`CODEGENBOX_MEMORY_LIMIT` (for example `2g`), and `CODEGENBOX_CPUS_LIMIT`
+(for example `1.5`). Unset values retain Docker/Colima defaults.
+
+The final Docker command is audited before execution: it must retain its fixed
+workspace/selected-state mounts, `--rm`, dropped capabilities, and
+no-new-privileges; privileged mode, host network/PID namespaces, Docker
+socket, and legacy volume flags are rejected. New images carry
+`io.codegenbox.compatibility=1`; existing unlabelled 0.1 images remain
+supported, while a present incompatible marker is rejected. Dead `running`
+session records are recovered via the same safe import/status logic; dirty
+clones are retained.
 
 ## Manual real-agent persistence check
 
