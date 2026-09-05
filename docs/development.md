@@ -21,7 +21,7 @@ and OpenCode. Keep OS, toolchain, and agent versions explicit in Docker build
 inputs. Normal agent startup must not run `npx`, install a package, or depend
 on a package registry; the adapter commands above execute installed binaries.
 
-The CLI default is `docker.io/atacandur/codegenbox:0.1.0`.
+The CLI default is `docker.io/atacandur/codegenbox:0.2.0`.
 `CODEGENBOX_IMAGE` remains the only supported image override for a compatible
 local, private, or test image; it must not alter the fixed command or mount
 contract. The published OCI index contains `linux/arm64` and `linux/amd64`

@@ -28,7 +28,7 @@ codegenbox version
 ```
 
 Set `CODEGENBOX_INSTALL_DIR` to choose another binary directory. The installer
-defaults to release `0.1.0`; set `CODEGENBOX_VERSION` to install a different
+defaults to release `0.2.0`; set `CODEGENBOX_VERSION` to install a different
 published version. The first agent run pulls the matching public development
 image automatically.
 
@@ -94,7 +94,7 @@ the source branch and Codegenbox metadata remain unchanged.
 
 ## Production image
 
-The default image is `docker.io/atacandur/codegenbox:0.1.0`. It contains the
+The default image is `docker.io/atacandur/codegenbox:0.2.0`. It contains the
 production development environment and installed agent CLIs, so adapters use
 fixed direct commands instead of downloading an agent with `npx` at session
 startup:
@@ -108,8 +108,8 @@ startup:
 Codex's bypass flag applies only inside Codegenbox's existing container
 boundary; it does not add host mounts or privileges. The published image index
 contains `linux/arm64` and `linux/amd64` variants, allowing Apple Silicon to
-pull the native ARM64 variant. The immutable `0.1.0` index digest is
-`sha256:11b94307b51a73b485d97f826cc50a31958157bd564a1a2899f719a68ade6170`.
+pull the native ARM64 variant. Each release image is immutable and published
+under its matching CLI version.
 
 Set `CODEGENBOX_IMAGE` to use a compatible local, private, or test image:
 
