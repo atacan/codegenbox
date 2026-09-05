@@ -10,6 +10,15 @@ for a safe later resume.
 Codegenbox provides checksum-verified release binaries for macOS and Linux on
 ARM64 and AMD64. Docker (or Colima on macOS) and Git must already be installed.
 
+With Homebrew:
+
+```sh
+brew install atacan/tap/codegenbox
+codegenbox version
+```
+
+Alternatively, install the release binary directly:
+
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/atacan/codegenbox/main/scripts/install.sh
 less install.sh
