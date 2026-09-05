@@ -260,6 +260,66 @@ func TestLifecycleRemovesCleanWorktreeAndRecordsInterruptedDockerRun(t *testing.
 	}
 }
 
+func TestLifecyclePrivateDependencyAuthorizationFailureDoesNotRunAgentOrExposeState(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("codex")
+	ran := false
+	manager := testManager(dataRoot, runnerFunc(func(context.Context, container.Invocation) error {
+		ran = true
+		return nil
+	}))
+	manager.PrivateDependencyResolver = func() (container.PrivateDependencyAuthorization, error) {
+		return container.PrivateDependencyAuthorization{}, errors.New("private dependency authorization unavailable")
+	}
+	result, err := manager.Start(context.Background(), repository, adapter, "node:22-bookworm", "docker")
+	if err == nil || !strings.Contains(err.Error(), "authorization unavailable") {
+		t.Fatalf("Start error = %v", err)
+	}
+	if ran {
+		t.Fatal("agent ran after private dependency authorization failure")
+	}
+	if result.Metadata.State != StateInterrupted || !result.WorkspaceRemoved {
+		t.Fatalf("result = %#v, want cleanly removed interrupted session", result)
+	}
+	if got := runGit(t, repository, "branch", "--show-current"); got != "main" {
+		t.Fatalf("authorization failure changed source branch to %q", got)
+	}
+}
+
+func TestLifecyclePrivateDependencyAuthorizationIsEphemeralAndHasNoExtraMount(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("codex")
+	const token = "github_pat_fake_read_only_123"
+	manager := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		if invocation.SecretEnvironment["CODEGENBOX_GITHUB_READ_TOKEN"] != token {
+			t.Fatalf("secret environment = %#v", invocation.SecretEnvironment)
+		}
+		if strings.Contains(strings.Join(invocation.Args, "\x00"), token) {
+			t.Fatalf("token leaked into invocation args: %#v", invocation.Args)
+		}
+		if len(valuesAfterInvocation(invocation.Args, "--mount")) != 2 { // clone plus selected Codex state
+			t.Fatalf("mounts = %#v", valuesAfterInvocation(invocation.Args, "--mount"))
+		}
+		return nil
+	}))
+	manager.PrivateDependencyResolver = func() (container.PrivateDependencyAuthorization, error) {
+		return container.PrivateDependencyAuthorization{GitHubReadToken: token}, nil
+	}
+	result, err := manager.Start(context.Background(), repository, adapter, "node:22-bookworm", "docker")
+	if err != nil || !result.WorkspaceRemoved {
+		t.Fatalf("Start = %#v, %v", result, err)
+	}
+	payload, err := os.ReadFile(MetadataPath(dataRoot, result.Metadata.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), token) {
+		t.Fatal("private dependency token was persisted in metadata")
+	}
+}
+
 func TestLifecycleFinalCleanupCheckPreservesLateDirtyClone(t *testing.T) {
 	repository := newRepository(t)
 	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")

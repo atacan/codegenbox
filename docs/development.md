@@ -41,6 +41,44 @@ self-contained clone at `/workspace`. Never add host home, a repository parent,
 the Docker socket, privileged mode, or GitHub write credentials while changing
 the image; retain dropped capabilities and `no-new-privileges`.
 
+## Phase 5 private GitHub dependencies
+
+Phase 5 deliberately does not forward `SSH_AUTH_SOCK`. Agent forwarding avoids
+private-key files, but it cannot make an arbitrary SSH-agent key read-only or
+limit the agent to Git dependency fetches: an agent can request signatures for
+other SSH/GitHub operations and the key's server-side permissions determine the
+result. A generic credential proxy has the same problem unless it terminates
+and reimplements Git's HTTPS transport, which would be a much larger trusted
+surface.
+
+The initial mechanism is opt-in `CODEGENBOX_GITHUB_READ_TOKEN`. It must be a
+separate fine-grained GitHub token limited to explicitly selected dependency
+repositories with `Contents: Read-only` and no other permissions. The resolver
+accepts only the `github_pat_` fine-grained-token prefix and a conservative
+token character set, and never reads `$HOME`,
+`~/.gitconfig`, `~/.ssh`, the host credential helper, or `gh` state. An absent
+variable returns disabled authorization; an invalid value fails before Docker
+starts.
+
+`BuildRunInvocation` passes the token to the Docker client through that
+client's per-process environment and uses `--env CODEGENBOX_GITHUB_READ_TOKEN`
+without a value. Consequently the token is absent from the Docker argument
+vector, metadata, mounts, and persistent files. Static in-container Git
+environment configuration disables system/global config, installs a
+`credential.https://github.com.helper`, and rewrites only the two standard
+GitHub SSH URL forms to HTTPS. Those settings and the secret exist only for the
+disposable agent process. They have no effect on trusted post-exit Git, push,
+compare, or PR operations; those retain the Phase 4 host environment
+scrubbing and never consume this token.
+
+This is capability containment, not secrecy from an agent: a compromised agent
+can read the token from its own environment and send it over the permitted
+network. The required server-side fine-grained, selected-repository,
+read-only scope limits the blast radius. Codegenbox cannot verify that remote
+scope locally. GitHub Enterprise and non-GitHub private dependency hosts are
+not supported. Do not add SSH forwarding, a broad token, arbitrary credential
+helpers, token files, or a general-purpose mount in an attempt to cover them.
+
 The image defaults to an unprivileged `agent` account, but Codegenbox passes
 Docker a validated `--user <host-uid>:<host-gid>` derived only from its own
 process. This lets the non-root container process write the host-owned session
@@ -122,6 +160,15 @@ GOCACHE=/private/tmp/codegenbox-go-cache go test -race ./...
 GOCACHE=/private/tmp/codegenbox-go-cache go vet ./...
 GOCACHE=/private/tmp/codegenbox-go-cache go build ./cmd/codegenbox
 ```
+
+For a manual private-dependency acceptance test, first obtain explicit approval
+to use a disposable repository and a dedicated read-only test token. Configure
+a dependency via either HTTPS or a conventional `git@github.com:`/`ssh://git@
+github.com/` URL, run one Codegenbox session with the environment variable, and
+verify the fetch succeeds. Then inspect the Docker invocation through the
+structural tests rather than printing the token, unset the variable, and verify
+the same private fetch fails without authorization. Never test this with host
+`gh` credentials, a personal SSH key, or a token with write access.
 
 ## Image build, verification, and publishing
 

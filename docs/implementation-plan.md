@@ -1447,6 +1447,17 @@ GitHub token forwarding
 credential proxy
 ```
 
+Approved implementation clarification: the initial implementation uses an
+explicitly supplied, separate GitHub fine-grained token only when it is scoped
+by GitHub to selected dependency repositories and `Contents: Read-only`. SSH
+agent forwarding is not sufficient for this phase because Codegenbox cannot
+constrain an arbitrary forwarded key to read-only Git fetches. The token is
+passed only to the disposable container process (never as a host mount, Docker
+argument, persistent file, or session field), and Git configuration is limited
+to `github.com` dependency authentication. This does not authorize a host Git
+or GitHub write operation; Phase 4 host behavior remains separate. GitHub
+Enterprise and other private Git hosts remain deferred.
+
 Success criterion:
 
 > Builds can fetch private dependencies without mounting SSH private-key files.

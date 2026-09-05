@@ -2,6 +2,7 @@ package container
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,6 +46,114 @@ func TestBuildRunInvocationContainsOnlySelectedAdapterState(t *testing.T) {
 		if strings.Contains(command, forbidden) {
 			t.Errorf("Docker invocation unexpectedly contains %q: %#v", forbidden, invocation.Args)
 		}
+	}
+}
+
+func TestBuildRunInvocationForwardsOnlyDedicatedReadTokenWithoutCredentialsOrExtraMounts(t *testing.T) {
+	stubHostIdentity(t, hostIdentity{uid: 501, gid: 20}, nil)
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const token = "github_pat_fake_read_only_123"
+	invocation, err := BuildRunInvocation("docker", "image", workspace, []string{"codex"}, nil, "codex", nil, nil, PrivateDependencyAuthorization{GitHubReadToken: token})
+	if err != nil {
+		t.Fatalf("BuildRunInvocation: %v", err)
+	}
+	command := strings.Join(invocation.Args, "\x00")
+	if strings.Contains(command, token) {
+		t.Fatalf("token leaked into Docker arguments: %#v", invocation.Args)
+	}
+	if invocation.SecretEnvironment["CODEGENBOX_GITHUB_READ_TOKEN"] != token {
+		t.Fatalf("secret environment = %#v", invocation.SecretEnvironment)
+	}
+	assertArgumentPair(t, invocation.Args, "--env", "CODEGENBOX_GITHUB_READ_TOKEN")
+	for _, want := range []string{
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_COUNT=3",
+		"GIT_CONFIG_KEY_0=credential.https://github.com.helper",
+		"GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf",
+		"GIT_CONFIG_VALUE_1=git@github.com:",
+		"GIT_CONFIG_KEY_2=url.https://github.com/.insteadOf",
+		"GIT_CONFIG_VALUE_2=ssh://git@github.com/",
+	} {
+		assertArgumentPair(t, invocation.Args, "--env", want)
+	}
+	if len(valuesAfter(invocation.Args, "--mount")) != 1 {
+		t.Fatalf("mounts = %#v, want only workspace", valuesAfter(invocation.Args, "--mount"))
+	}
+	for _, forbidden := range []string{"SSH_AUTH_SOCK", ".ssh", ".gitconfig", ".config/gh", "/var/run/docker.sock", "--privileged"} {
+		if strings.Contains(command, forbidden) {
+			t.Fatalf("private dependency invocation unexpectedly contains %q: %#v", forbidden, invocation.Args)
+		}
+	}
+}
+
+func TestBuildRunInvocationRejectsInvalidPrivateDependencyAuthorization(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	for _, token := range []string{"ghp_classicToken", "contains space", "contains\nnewline", "contains$command", strings.Repeat("a", 1025)} {
+		if _, err := BuildRunInvocation("docker", "image", workspace, []string{"codex"}, nil, "codex", nil, nil, PrivateDependencyAuthorization{GitHubReadToken: token}); err == nil {
+			t.Fatalf("accepted unsafe token %q", token)
+		}
+	}
+	if _, err := BuildRunInvocation("docker", "image", workspace, []string{"codex"}, nil, "codex", nil, nil, PrivateDependencyAuthorization{}, PrivateDependencyAuthorization{}); err == nil {
+		t.Fatal("accepted multiple private dependency authorizations")
+	}
+}
+
+func TestEnvironmentWithoutKeysReplacesInheritedSecret(t *testing.T) {
+	got := environmentWithoutKeys([]string{"PATH=/bin", "CODEGENBOX_GITHUB_READ_TOKEN=wrong", "OTHER=value"}, map[string]string{"CODEGENBOX_GITHUB_READ_TOKEN": "right"})
+	if strings.Join(got, "\x00") != "PATH=/bin\x00OTHER=value" {
+		t.Fatalf("environmentWithoutKeys() = %#v", got)
+	}
+}
+
+func TestPrivateDependencyGitConfigurationUsesReadTokenForGitHubOnly(t *testing.T) {
+	const token = "github_pat_fake_read_only_123"
+	var args []string
+	secrets, err := addPrivateDependencyAuthorization(&args, PrivateDependencyAuthorization{GitHubReadToken: token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := append([]string{}, os.Environ()...)
+	for index := 0; index+1 < len(args); index += 2 {
+		if args[index] != "--env" || args[index+1] == "CODEGENBOX_GITHUB_READ_TOKEN" {
+			continue
+		}
+		environment = append(environment, args[index+1])
+	}
+	for key, value := range secrets {
+		environment = append(environment, key+"="+value)
+	}
+
+	credential := exec.Command("git", "credential", "fill")
+	credential.Env = environment
+	credential.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
+	output, err := credential.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git credential fill: %v\n%s", err, output)
+	}
+	if got := string(output); !strings.Contains(got, "username=x-access-token\n") || !strings.Contains(got, "password="+token+"\n") {
+		t.Fatalf("Git helper output = %q", got)
+	}
+	nonGitHub := exec.Command("git", "credential", "fill")
+	nonGitHub.Env = environment
+	nonGitHub.Stdin = strings.NewReader("protocol=https\nhost=example.invalid\n\n")
+	output, err = nonGitHub.CombinedOutput()
+	if strings.Contains(string(output), token) {
+		t.Fatalf("Git helper leaked token to non-GitHub host: %q", output)
+	}
+
+	rewrites := exec.Command("git", "config", "--get-all", "url.https://github.com/.insteadOf")
+	rewrites.Env = environment
+	output, err = rewrites.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git config rewrites: %v\n%s", err, output)
+	}
+	if got := string(output); got != "git@github.com:\nssh://git@github.com/\n" {
+		t.Fatalf("GitHub SSH rewrite configuration = %q", got)
 	}
 }
 

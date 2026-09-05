@@ -11,17 +11,19 @@ import (
 
 	"github.com/codegenbox/codegenbox/internal/agent"
 	"github.com/codegenbox/codegenbox/internal/container"
+	"github.com/codegenbox/codegenbox/internal/dependency"
 	gitops "github.com/codegenbox/codegenbox/internal/git"
 )
 
 // Manager coordinates isolated clone setup, Docker execution, and post-exit
 // import. It performs no source-repository import while Runner.Run is active.
 type Manager struct {
-	DataRoot      string
-	Runner        container.Runner
-	Now           func() time.Time
-	NewID         func(repository string, now time.Time) (string, error)
-	StateResolver func(agent.Adapter) ([]container.StateMount, error)
+	DataRoot                  string
+	Runner                    container.Runner
+	Now                       func() time.Time
+	NewID                     func(repository string, now time.Time) (string, error)
+	StateResolver             func(agent.Adapter) ([]container.StateMount, error)
+	PrivateDependencyResolver func() (container.PrivateDependencyAuthorization, error)
 	// BeforeCleanup is a test-only synchronization hook. Production leaves it nil.
 	BeforeCleanup func(workspace string)
 }
@@ -109,11 +111,15 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 		return result, err
 	}
 
+	privateDependencies, privateDependencyErr := m.resolvePrivateDependencies()
+	if privateDependencyErr != nil {
+		return m.finish(ctx, dataRoot, repository.Root, result, privateDependencyErr)
+	}
 	stateMounts, stateErr := m.resolveState(adapter)
 	if stateErr != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, stateErr)
 	}
-	invocation, invocationErr := container.BuildRunInvocation(dockerBinary, image, workspace, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts)
+	invocation, invocationErr := container.BuildRunInvocation(dockerBinary, image, workspace, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, privateDependencies)
 	if invocationErr != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, invocationErr)
 	}
@@ -167,11 +173,15 @@ func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Re
 	if err := WriteMetadata(dataRoot, metadata); err != nil {
 		return result, err
 	}
+	privateDependencies, err := m.resolvePrivateDependencies()
+	if err != nil {
+		return m.finish(ctx, dataRoot, repository.Root, result, err)
+	}
 	stateMounts, err := m.resolveState(adapter)
 	if err != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, err)
 	}
-	invocation, err := container.BuildRunInvocation(dockerBinary, image, metadata.Worktree, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts)
+	invocation, err := container.BuildRunInvocation(dockerBinary, image, metadata.Worktree, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, privateDependencies)
 	if err != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, err)
 	}
@@ -184,6 +194,14 @@ func (m Manager) resolveState(adapter agent.Adapter) ([]container.StateMount, er
 		resolver = agent.ResolveState
 	}
 	return resolver(adapter)
+}
+
+func (m Manager) resolvePrivateDependencies() (container.PrivateDependencyAuthorization, error) {
+	resolver := m.PrivateDependencyResolver
+	if resolver == nil {
+		resolver = dependency.Resolve
+	}
+	return resolver()
 }
 
 func (m Manager) finish(ctx context.Context, dataRoot, repositoryRoot string, result Result, runErr error) (Result, error) {

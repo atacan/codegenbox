@@ -14,8 +14,16 @@ import (
 const workspace = "/workspace"
 
 type Invocation struct {
-	Binary string
-	Args   []string
+	Binary            string
+	Args              []string
+	SecretEnvironment map[string]string
+}
+
+// PrivateDependencyAuthorization is deliberately limited to a separate,
+// read-only GitHub dependency token. It is not a host GitHub/gh credential and
+// it is never serialized or added to Docker command arguments.
+type PrivateDependencyAuthorization struct {
+	GitHubReadToken string
 }
 
 type hostIdentity struct {
@@ -59,7 +67,7 @@ var allowedDestinations = map[string]map[string]bool{
 	"opencode": {"/home/agent/.config/opencode": true, "/home/agent/.local/share/opencode": true},
 }
 
-func BuildRunInvocation(binary, image, workspacePath string, command []string, environment []string, selectedAgent string, protectedSources []string, stateMounts []StateMount) (Invocation, error) {
+func BuildRunInvocation(binary, image, workspacePath string, command []string, environment []string, selectedAgent string, protectedSources []string, stateMounts []StateMount, privateDependencies ...PrivateDependencyAuthorization) (Invocation, error) {
 	if strings.TrimSpace(binary) == "" {
 		return Invocation{}, fmt.Errorf("Docker binary is required")
 	}
@@ -104,9 +112,65 @@ func BuildRunInvocation(binary, image, workspacePath string, command []string, e
 		seen[mount.Destination] = true
 		args = append(args, "--mount", mountArgument(mount.Source, mount.Destination, mount.ReadOnly))
 	}
+	if len(privateDependencies) > 1 {
+		return Invocation{}, fmt.Errorf("only one private dependency authorization is supported")
+	}
+	var privateDependencyAuthorization PrivateDependencyAuthorization
+	if len(privateDependencies) == 1 {
+		privateDependencyAuthorization = privateDependencies[0]
+	}
+	secretEnvironment, err := addPrivateDependencyAuthorization(&args, privateDependencyAuthorization)
+	if err != nil {
+		return Invocation{}, err
+	}
 	args = append(args, image)
 	args = append(args, command...)
-	return Invocation{Binary: binary, Args: args}, nil
+	return Invocation{Binary: binary, Args: args, SecretEnvironment: secretEnvironment}, nil
+}
+
+// addPrivateDependencyAuthorization configures Git only inside the disposable
+// container. Git's command-line configuration takes precedence over an
+// agent-controlled clone config, while the helper is URL-scoped to github.com.
+// The token itself is inherited by Docker's child process via --env NAME, so
+// it cannot appear in ps-visible Docker arguments or Invocation.Args.
+func addPrivateDependencyAuthorization(args *[]string, authorization PrivateDependencyAuthorization) (map[string]string, error) {
+	if authorization.GitHubReadToken == "" {
+		return nil, nil
+	}
+	if err := validateGitHubReadToken(authorization.GitHubReadToken); err != nil {
+		return nil, fmt.Errorf("invalid private dependency authorization: %w", err)
+	}
+	const helper = `!f() { test "$1" = get || exit 0; printf 'username=x-access-token\npassword=%s\n\n' "$CODEGENBOX_GITHUB_READ_TOKEN"; }; f`
+	for _, value := range []string{
+		"CODEGENBOX_GITHUB_READ_TOKEN",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_COUNT=3",
+		"GIT_CONFIG_KEY_0=credential.https://github.com.helper",
+		"GIT_CONFIG_VALUE_0=" + helper,
+		"GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf",
+		"GIT_CONFIG_VALUE_1=git@github.com:",
+		"GIT_CONFIG_KEY_2=url.https://github.com/.insteadOf",
+		"GIT_CONFIG_VALUE_2=ssh://git@github.com/",
+	} {
+		*args = append(*args, "--env", value)
+	}
+	return map[string]string{"CODEGENBOX_GITHUB_READ_TOKEN": authorization.GitHubReadToken}, nil
+}
+
+func validateGitHubReadToken(token string) error {
+	if len(token) == 0 || len(token) > 1024 {
+		return fmt.Errorf("token length is invalid")
+	}
+	if !strings.HasPrefix(token, "github_pat_") {
+		return fmt.Errorf("token must be a fine-grained GitHub token")
+	}
+	for _, character := range token {
+		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '_' || character == '-') {
+			return fmt.Errorf("token contains unsupported characters")
+		}
+	}
+	return nil
 }
 
 func cleanMountSource(source string) (string, error) {
@@ -289,8 +353,28 @@ type ExecRunner struct {
 func (r ExecRunner) Run(ctx context.Context, invocation Invocation) error {
 	cmd := exec.CommandContext(ctx, invocation.Binary, invocation.Args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = r.Stdin, r.Stdout, r.Stderr
+	if len(invocation.SecretEnvironment) != 0 {
+		cmd.Env = environmentWithoutKeys(os.Environ(), invocation.SecretEnvironment)
+		for key, value := range invocation.SecretEnvironment {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+	}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker run: %w", err)
 	}
 	return nil
+}
+
+func environmentWithoutKeys(environment []string, secrets map[string]string) []string {
+	result := make([]string, 0, len(environment)+len(secrets))
+	for _, entry := range environment {
+		key, _, found := strings.Cut(entry, "=")
+		if found {
+			if _, secret := secrets[key]; secret {
+				continue
+			}
+		}
+		result = append(result, entry)
+	}
+	return result
 }

@@ -142,6 +142,36 @@ location and all state paths must be shared with Docker/Colima. Standard Colima
 shares the home directory; macOS `/tmp` resolves to `/private/tmp`, which is
 not shared by default.
 
+## Private Git dependencies
+
+Private GitHub dependencies are opt-in. For a session that needs them, provide
+a separate GitHub **fine-grained** personal access token restricted to the
+specific dependency repositories, with only repository `Contents: Read-only`.
+Do not reuse the credential used by host Git or `gh`, and do not grant any
+write, administration, workflow, or organization permission. Codegenbox
+accepts only fine-grained-token-shaped values beginning `github_pat_`; it
+rejects classic and OAuth-style tokens.
+
+```sh
+export CODEGENBOX_GITHUB_READ_TOKEN='github_pat_...'
+codegenbox codex
+unset CODEGENBOX_GITHUB_READ_TOKEN
+```
+
+The token is forwarded only to the disposable Docker process, not written to a
+file, Docker command argument, Codegenbox metadata, agent state, or Git
+configuration. Git is configured in that container process only to supply the
+token for HTTPS `github.com` fetches; conventional GitHub SSH dependency URLs
+are rewritten to HTTPS. No SSH agent, SSH directory/key, host Git config,
+`gh` state, or credential helper is mounted. With the variable absent, this
+feature is disabled and the ordinary Phase 1–4 mount boundary is unchanged.
+
+The container can read and exfiltrate this token, so it is not a defense
+against a malicious agent; the token's GitHub-enforced repository selection and
+read-only permission are the containment. Codegenbox validates only its safe
+syntax, not its server-side scope. GitHub Enterprise and non-GitHub private
+hosts are intentionally unsupported in this initial implementation.
+
 ## Security and lifecycle
 
 The ordinary source mount is exactly the independent session clone at
@@ -159,9 +189,11 @@ failed clones are never auto-deleted; committed work is still imported when a
 clone remains dirty.
 
 GitHub credentials, SSH private keys, host Git configuration, and writable
-GitHub authentication state are never mounted into the container. Host Git and
-`gh` operations occur only through the explicit commands above, after the
-agent container has terminated.
+GitHub authentication state are never mounted into the container. The only
+exception is the explicitly supplied, separate, read-only private-dependency
+token described above; it is not a host GitHub credential and never enables
+GitHub writes. Host Git and `gh` operations occur only through the explicit
+commands above, after the agent container has terminated.
 
 ## Manual real-agent persistence check
 
