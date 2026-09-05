@@ -23,16 +23,9 @@ defaults to release `0.1.0`; set `CODEGENBOX_VERSION` to install a different
 published version. The first agent run pulls the matching public development
 image automatically.
 
-Until the first GitHub CLI release is published, build from this checkout:
-
-```sh
-go build -o "$HOME/.local/bin/codegenbox" ./cmd/codegenbox
-```
-
 ## Use
 
 ```sh
-go build ./cmd/codegenbox
 cd /path/to/a/git/repository
 codegenbox claude
 codegenbox codex
