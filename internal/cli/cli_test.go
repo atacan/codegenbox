@@ -10,6 +10,7 @@ import (
 
 	"github.com/codegenbox/codegenbox/internal/config"
 	"github.com/codegenbox/codegenbox/internal/session"
+	"github.com/codegenbox/codegenbox/internal/terminal"
 	buildversion "github.com/codegenbox/codegenbox/internal/version"
 )
 
@@ -74,5 +75,65 @@ func TestSessionsListsNonSensitiveRecordsInStableOrder(t *testing.T) {
 	}
 	if _, err := parseArguments([]string{"unexpected", "argument"}); err == nil || !strings.Contains(err.Error(), "codegenbox continue <session-id>") {
 		t.Fatalf("general usage = %v", err)
+	}
+}
+
+func TestSessionSummaryUsesPortablePlainTextBullets(t *testing.T) {
+	var output bytes.Buffer
+	printResult(context.Background(), &output, terminal.New(false), session.Result{
+		Metadata: session.Metadata{
+			ID:            "abc123",
+			SessionBranch: "codegenbox/abc123",
+			State:         session.StateCompleted,
+		},
+		WorkspaceRemoved: true,
+	})
+
+	want := "Codegenbox session complete.\n\nSession\n- ID: abc123\n- Branch: codegenbox/abc123\n- Workspace: removed\n\nNext action\n- Continue: codegenbox continue abc123\n"
+	if got := output.String(); got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+}
+
+func TestSessionSummaryStylesOnlyActionableCommandValue(t *testing.T) {
+	var output bytes.Buffer
+	printResult(context.Background(), &output, terminal.New(true), session.Result{
+		Metadata: session.Metadata{
+			ID:            "abc123",
+			SessionBranch: "codegenbox/abc123",
+			State:         session.StateCompleted,
+		},
+		WorkspaceRemoved: true,
+	})
+
+	got := output.String()
+	if !strings.Contains(got, "- Continue: \x1b[1;36mcodegenbox continue abc123\x1b[0m\n") {
+		t.Fatalf("action command was not styled: %q", got)
+	}
+	if strings.Contains(got, "\x1b[1;36m- Continue:") || strings.Contains(got, "\x1b[1;36mcodegenbox/abc123") {
+		t.Fatalf("labels or informational values were styled as commands: %q", got)
+	}
+}
+
+func TestActionRowsUseOneCommandStylingConvention(t *testing.T) {
+	var output bytes.Buffer
+	style := terminal.New(true)
+	for _, action := range []struct {
+		label   string
+		command string
+	}{
+		{"Push branch", "codegenbox push abc123"},
+		{"Open comparison", "codegenbox compare abc123"},
+		{"Create pull request", "codegenbox pr abc123"},
+		{"Resume", "codegenbox resume abc123"},
+		{"Continue", "codegenbox continue abc123"},
+	} {
+		printAction(&output, style, action.label, action.command)
+	}
+
+	for _, line := range strings.Split(strings.TrimSuffix(output.String(), "\n"), "\n") {
+		if !strings.HasPrefix(line, "- ") || !strings.Contains(line, ": \x1b[1;36mcodegenbox ") || !strings.HasSuffix(line, "\x1b[0m") {
+			t.Fatalf("action line does not use the shared command convention: %q", line)
+		}
 	}
 }

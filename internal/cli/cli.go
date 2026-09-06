@@ -14,6 +14,7 @@ import (
 	"github.com/codegenbox/codegenbox/internal/doctor"
 	"github.com/codegenbox/codegenbox/internal/host"
 	"github.com/codegenbox/codegenbox/internal/session"
+	"github.com/codegenbox/codegenbox/internal/terminal"
 	buildversion "github.com/codegenbox/codegenbox/internal/version"
 )
 
@@ -31,6 +32,7 @@ type Environment struct {
 
 func Run(ctx context.Context, arguments []string, environment Environment) error {
 	output := chooseWriter(environment.Stdout, os.Stdout)
+	style := terminal.ForWriter(output)
 	if len(arguments) == 1 && (arguments[0] == "version" || arguments[0] == "--version") {
 		_, err := fmt.Fprintf(output, "codegenbox %s\n", buildversion.Version)
 		return err
@@ -89,11 +91,14 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(output, "Pushed %s to its source origin.\n", metadata.SessionBranch)
+		fmt.Fprintln(output, style.Success("Pushed "+metadata.SessionBranch+" to its source origin."))
 		if result.GitHub != nil {
 			address, urlErr := host.CompareURL(metadata, *result.GitHub)
 			if urlErr == nil {
-				fmt.Fprintf(output, "Open a compare/PR page: codegenbox compare %s\n%s\n", metadata.ID, address)
+				fmt.Fprintln(output, "\nNext action")
+				printAction(output, style, "Open comparison", "codegenbox compare "+metadata.ID)
+				printAction(output, style, "Create pull request", "codegenbox pr "+metadata.ID)
+				printSummaryLine(output, "Comparison URL", address)
 			}
 		}
 		return nil
@@ -136,7 +141,7 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		}
 		result, runErr := manager.Resume(ctx, arguments[1], configured.Image, configured.DockerBinary)
 		if result.Metadata.ID != "" {
-			printResult(ctx, output, result)
+			printResult(ctx, output, style, result)
 		}
 		if runErr != nil {
 			return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
@@ -151,7 +156,7 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		}
 		result, runErr := manager.Continue(ctx, arguments[1], configured.Image, configured.DockerBinary)
 		if result.Metadata.ID != "" {
-			printResult(ctx, output, result)
+			printResult(ctx, output, style, result)
 		}
 		if runErr != nil {
 			return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
@@ -183,7 +188,7 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		}
 		result, runErr := manager.Start(ctx, workingDirectory, adapter, configured.Image, configured.DockerBinary)
 		if result.Metadata.ID != "" {
-			printResult(ctx, output, result)
+			printResult(ctx, output, style, result)
 		}
 		if runErr != nil {
 			return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
@@ -204,47 +209,84 @@ func parseArguments(arguments []string) (string, error) {
 	return "", fmt.Errorf("usage: codegenbox <agent> | codegenbox run <agent> | codegenbox resume <session-id> | codegenbox continue <session-id> | codegenbox sessions | codegenbox doctor | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode")
 }
 
-func printResult(ctx context.Context, output io.Writer, result session.Result) {
+func printResult(ctx context.Context, output io.Writer, style terminal.Style, result session.Result) {
 	metadata := result.Metadata
 	switch metadata.State {
 	case session.StateCompleted:
-		fmt.Fprintf(output, "Codegenbox session complete.\n\nBranch: %s\nTemporary workspace: removed\nContinue this branch: codegenbox continue %s\n", metadata.SessionBranch, metadata.ID)
+		fmt.Fprintln(output, style.Success("Codegenbox session complete."))
+		fmt.Fprintln(output, "\nSession")
+		printSummaryLine(output, "ID", metadata.ID)
+		printSummaryLine(output, "Branch", metadata.SessionBranch)
+		printSummaryLine(output, "Workspace", "removed")
+		fmt.Fprintln(output, "\nNext action")
+		printAction(output, style, "Continue", "codegenbox continue "+metadata.ID)
 	case session.StateDirty:
-		fmt.Fprintf(output, "Codegenbox session stopped with uncommitted changes.\n\nWorkspace preserved: %s\nResume: codegenbox resume %s\n", metadata.Worktree, metadata.ID)
+		fmt.Fprintln(output, style.Warning("Codegenbox session stopped with uncommitted changes."))
+		fmt.Fprintln(output, "\nSession")
+		printSummaryLine(output, "ID", metadata.ID)
+		printSummaryLine(output, "Workspace", metadata.Worktree)
+		fmt.Fprintln(output, "\nNext action")
+		printAction(output, style, "Resume", "codegenbox resume "+metadata.ID)
 	case session.StateInterrupted:
-		fmt.Fprintf(output, "Codegenbox session was interrupted.\n\nWorkspace: %s\n", workspaceMessage(result))
+		fmt.Fprintln(output, style.Warning("Codegenbox session was interrupted."))
+		fmt.Fprintln(output, "\nSession")
+		printSummaryLine(output, "ID", metadata.ID)
+		printSummaryLine(output, "Workspace", workspaceMessage(result))
+		if !result.WorkspaceRemoved {
+			fmt.Fprintln(output, "\nNext action")
+			printAction(output, style, "Resume", "codegenbox resume "+metadata.ID)
+		}
 	case session.StateClean:
-		fmt.Fprintf(output, "Codegenbox found a clean workspace but could not remove it.\n\nWorkspace preserved: %s\n", metadata.Worktree)
+		fmt.Fprintln(output, style.Warning("Codegenbox found a clean workspace but could not remove it."))
+		fmt.Fprintln(output, "\nSession")
+		printSummaryLine(output, "ID", metadata.ID)
+		printSummaryLine(output, "Workspace", metadata.Worktree)
+		fmt.Fprintln(output, "\nNext action")
+		printAction(output, style, "Resume", "codegenbox resume "+metadata.ID)
 	}
-	printHostSummary(ctx, output, metadata)
+	printHostSummary(ctx, output, style, metadata)
 }
 
-func printHostSummary(ctx context.Context, output io.Writer, metadata session.Metadata) {
+func printHostSummary(ctx context.Context, output io.Writer, style terminal.Style, metadata session.Metadata) {
 	if metadata.Repository == "" || metadata.BaseBranch == "" || metadata.BaseCommit == "" || metadata.SessionBranch == "" {
 		return
 	}
 	fmt.Fprintln(output, "\nHost session summary:")
-	fmt.Fprintf(output, "Source repository: %s\nBase: %s (%s)\nSession branch: %s\n", metadata.Repository, metadata.BaseBranch, metadata.BaseCommit, metadata.SessionBranch)
+	printSummaryLine(output, "Source repository", metadata.Repository)
+	printSummaryLine(output, "Base", fmt.Sprintf("%s (%s)", metadata.BaseBranch, metadata.BaseCommit))
+	printSummaryLine(output, "Session branch", metadata.SessionBranch)
 	if metadata.ImportedCommit == "" {
-		fmt.Fprintln(output, "Imported commit: unavailable (the session branch was not imported)")
+		printSummaryLine(output, "Imported commit", "unavailable (the session branch was not imported)")
 		return
 	}
 	summary, err := host.Summarize(ctx, metadata)
 	if err != nil {
-		fmt.Fprintf(output, "Imported commit: %s\nSummary details unavailable: %v\n", metadata.ImportedCommit, err)
+		printSummaryLine(output, "Imported commit", metadata.ImportedCommit)
+		printSummaryLine(output, "Summary details unavailable", err.Error())
 		return
 	}
-	fmt.Fprintf(output, "Imported commit: %s\nCommits added: %d\n", summary.ImportedCommit, len(summary.Commits))
+	printSummaryLine(output, "Imported commit", summary.ImportedCommit)
+	printSummaryLine(output, "Commits added", fmt.Sprintf("%d", len(summary.Commits)))
 	for _, commit := range summary.Commits {
-		fmt.Fprintf(output, "  %s %s\n", commit.ID, commit.Subject)
+		printSummaryLine(output, "Commit", commit.ID+" "+commit.Subject)
 	}
-	fmt.Fprintf(output, "Changed files: %d (+%d -%d)\n", summary.ChangedFiles, summary.Insertions, summary.Deletions)
-	fmt.Fprintf(output, "Push this exact branch: codegenbox push %s\n", metadata.ID)
+	printSummaryLine(output, "Changed files", fmt.Sprintf("%d (+%d -%d)", summary.ChangedFiles, summary.Insertions, summary.Deletions))
+	printAction(output, style, "Push branch", "codegenbox push "+metadata.ID)
 	if remote, remoteErr := host.DetectGitHubRemote(ctx, metadata.Repository); remoteErr == nil {
 		if address, addressErr := host.CompareURL(metadata, remote); addressErr == nil {
-			fmt.Fprintf(output, "Open a GitHub compare/PR page: codegenbox compare %s\n%s\n", metadata.ID, address)
+			printAction(output, style, "Open comparison", "codegenbox compare "+metadata.ID)
+			printAction(output, style, "Create pull request", "codegenbox pr "+metadata.ID)
+			printSummaryLine(output, "Comparison URL", address)
 		}
 	}
+}
+
+func printSummaryLine(output io.Writer, label, value string) {
+	fmt.Fprintf(output, "- %s: %s\n", label, value)
+}
+
+func printAction(output io.Writer, style terminal.Style, label, command string) {
+	printSummaryLine(output, label, style.Command(command))
 }
 
 func printSessions(output io.Writer, dataRoot string) error {
