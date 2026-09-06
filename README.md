@@ -43,6 +43,7 @@ codegenbox codex
 codegenbox opencode
 codegenbox sessions
 codegenbox resume <session-id>
+codegenbox continue <session-id>
 codegenbox push <session-id>
 codegenbox compare <session-id>
 codegenbox pr <session-id>
@@ -52,7 +53,11 @@ codegenbox doctor
 `codegenbox <agent>` and `codegenbox run <agent>` are equivalent. `sessions`
 prints stable ID/agent/state/workspace/branch records without reading or
 printing credentials. `resume` requires an explicit ID; it never accepts a
-workspace path or silently chooses a session.
+workspace path or silently chooses a session. Use `resume <id>` for a retained
+dirty or interrupted workspace. Use `continue <id>` only after a clean
+workspace was removed: it reconstructs that exact workspace from the trusted
+local `codegenbox/<id>` tip and records another run on the same session branch.
+This version always uses the agent originally recorded for the session.
 
 ## Host GitHub workflow
 
@@ -67,6 +72,11 @@ After reviewing the summary, push only the generated branch explicitly:
 ```sh
 codegenbox push <session-id>
 ```
+
+After a continuation, run the same explicit push again to update an existing
+PR. Continuation never fetches or adopts a remote branch: if the local reserved
+session ref was moved, rewound, or advanced outside Codegenbox, it fails and
+leaves recoverable work untouched.
 
 The command reads only `origin`'s push URL from the original source repository
 and pushes the fixed refspec
@@ -186,10 +196,12 @@ credentials.
 
 After Docker returns, Codegenbox validates and imports only the reserved
 `codegenbox/<session-id>` branch if it is the recorded base commit or a
-descendant. On resume, that branch is atomically advanced only from the
-recorded imported commit. Main and unrelated refs are untouched. Dirty and
-failed clones are never auto-deleted; committed work is still imported when a
-clone remains dirty.
+descendant. On resume or continue, that branch is atomically advanced only
+from the recorded imported commit. Continue first requires its workspace path
+to be absent and the local source branch to match that exact trusted tip; it
+does not fetch, adopt, or reconcile remote state. Main and unrelated refs are
+untouched. Dirty and failed clones are never auto-deleted; committed work is
+still imported when a clone remains dirty.
 
 GitHub credentials, SSH private keys, host Git configuration, and writable
 GitHub authentication state are never mounted into the container. The only

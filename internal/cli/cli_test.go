@@ -66,4 +66,13 @@ func TestSessionsListsNonSensitiveRecordsInStableOrder(t *testing.T) {
 	if err := Run(context.Background(), []string{"resume"}, Environment{Config: func() (config.Config, error) { return config.Config{DataRoot: root}, nil }}); err == nil {
 		t.Fatal("resume without an ID accepted")
 	}
+	for _, arguments := range [][]string{{"continue"}, {"continue", ""}, {"continue", "one", "two"}} {
+		err := Run(context.Background(), arguments, Environment{Config: func() (config.Config, error) { return config.Config{DataRoot: root}, nil }})
+		if err == nil || err.Error() != "usage: codegenbox continue <session-id>" {
+			t.Fatalf("continue arguments %q error = %v", arguments, err)
+		}
+	}
+	if _, err := parseArguments([]string{"unexpected", "argument"}); err == nil || !strings.Contains(err.Error(), "codegenbox continue <session-id>") {
+		t.Fatalf("general usage = %v", err)
+	}
 }

@@ -629,6 +629,172 @@ func TestResumePreservesCloneWhenImportedCommitCompareAndSwapFails(t *testing.T)
 	}
 }
 
+func TestContinueReconstructsCompletedSessionOnSameBranch(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("claude")
+	base := runGit(t, repository, "rev-parse", "main")
+	runGit(t, repository, "branch", "unrelated", "main")
+	runGit(t, repository, "tag", "keep-tag", "main")
+	first := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		workspace := invocationWorktree(t, invocation)
+		writeFile(t, filepath.Join(workspace, "first.txt"), "first\n")
+		runGit(t, workspace, "add", "first.txt")
+		runGit(t, workspace, "commit", "-m", "first")
+		return nil
+	}))
+	initial, err := first.Start(context.Background(), repository, adapter, "image", "docker")
+	if err != nil || initial.Metadata.State != StateCompleted || !initial.WorkspaceRemoved {
+		t.Fatalf("start = %#v, %v", initial, err)
+	}
+	firstTip := initial.Metadata.ImportedCommit
+
+	continued := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		assertOnlyAgentStateMounts(t, invocation, "claude")
+		workspace := invocationWorktree(t, invocation)
+		if got := runGit(t, workspace, "rev-parse", "HEAD"); got != firstTip {
+			t.Fatalf("continuation checkout = %s, want %s", got, firstTip)
+		}
+		writeFile(t, filepath.Join(workspace, "second.txt"), "second\n")
+		runGit(t, workspace, "add", "second.txt")
+		runGit(t, workspace, "commit", "-m", "second")
+		return nil
+	}))
+	result, err := continued.Continue(context.Background(), initial.Metadata.ID, "image", "docker")
+	if err != nil || result.Metadata.State != StateCompleted || !result.WorkspaceRemoved {
+		t.Fatalf("continue = %#v, %v", result, err)
+	}
+	if result.Metadata.ID != initial.Metadata.ID || result.Metadata.SessionBranch != initial.Metadata.SessionBranch || result.Metadata.ResumeCount != 0 || result.Metadata.ContinueCount != 1 || result.Metadata.LastContinuedAt == nil || result.Metadata.ImportedCommit == firstTip {
+		t.Fatalf("continuation metadata = %#v", result.Metadata)
+	}
+	if got := runGit(t, repository, "rev-parse", result.Metadata.SessionBranch); got != result.Metadata.ImportedCommit {
+		t.Fatalf("source branch = %s, imported = %s", got, result.Metadata.ImportedCommit)
+	}
+	if got := runGit(t, repository, "rev-parse", "main"); got != base {
+		t.Fatalf("main moved from %s to %s", base, got)
+	}
+	if got := runGit(t, repository, "rev-parse", "unrelated"); got != base {
+		t.Fatalf("unrelated ref moved from %s to %s", base, got)
+	}
+	if got := runGit(t, repository, "rev-parse", "keep-tag"); got != base {
+		t.Fatalf("tag moved from %s to %s", base, got)
+	}
+	if _, statErr := os.Lstat(result.Metadata.Worktree); !os.IsNotExist(statErr) {
+		t.Fatalf("clean continuation clone retained: %v", statErr)
+	}
+}
+
+func TestContinueNoOpAndRejectsExistingWorkspace(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("codex")
+	initial, err := testManager(dataRoot, runnerFunc(func(context.Context, container.Invocation) error { return nil })).Start(context.Background(), repository, adapter, "image", "docker")
+	if err != nil || !initial.WorkspaceRemoved {
+		t.Fatalf("start = %#v, %v", initial, err)
+	}
+	noOp := testManager(dataRoot, runnerFunc(func(context.Context, container.Invocation) error { return nil }))
+	result, err := noOp.Continue(context.Background(), initial.Metadata.ID, "image", "docker")
+	if err != nil || !result.WorkspaceRemoved || result.Metadata.ImportedCommit != initial.Metadata.ImportedCommit || result.Metadata.ContinueCount != 1 {
+		t.Fatalf("no-op continue = %#v, %v", result, err)
+	}
+	if err := os.Mkdir(result.Metadata.Worktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	rejected := testManager(dataRoot, runnerFunc(func(context.Context, container.Invocation) error { ran = true; return nil }))
+	if _, err := rejected.Continue(context.Background(), initial.Metadata.ID, "image", "docker"); err == nil || !strings.Contains(err.Error(), "use codegenbox resume") || ran {
+		t.Fatalf("existing-workspace continuation err=%v ran=%v", err, ran)
+	}
+	if _, statErr := os.Stat(result.Metadata.Worktree); statErr != nil {
+		t.Fatalf("existing workspace changed: %v", statErr)
+	}
+}
+
+func TestContinueDirtyCloneIsRetainedAndResumeUsesIt(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("codex")
+	initial, err := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		workspace := invocationWorktree(t, invocation)
+		writeFile(t, filepath.Join(workspace, "first.txt"), "first")
+		runGit(t, workspace, "add", "first.txt")
+		runGit(t, workspace, "commit", "-m", "first")
+		return nil
+	})).Start(context.Background(), repository, adapter, "image", "docker")
+	if err != nil || !initial.WorkspaceRemoved {
+		t.Fatalf("start = %#v, %v", initial, err)
+	}
+	continued := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		workspace := invocationWorktree(t, invocation)
+		writeFile(t, filepath.Join(workspace, "second.txt"), "second")
+		runGit(t, workspace, "add", "second.txt")
+		runGit(t, workspace, "commit", "-m", "second")
+		writeFile(t, filepath.Join(workspace, "dirty.txt"), "retain")
+		return nil
+	}))
+	dirty, err := continued.Continue(context.Background(), initial.Metadata.ID, "image", "docker")
+	if err != nil || dirty.Metadata.State != StateDirty || dirty.WorkspaceRemoved {
+		t.Fatalf("dirty continue = %#v, %v", dirty, err)
+	}
+	resumed := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		workspace := invocationWorktree(t, invocation)
+		if workspace != dirty.Metadata.Worktree {
+			t.Fatalf("resume reconstructed workspace %q, want retained %q", workspace, dirty.Metadata.Worktree)
+		}
+		if err := os.Remove(filepath.Join(workspace, "dirty.txt")); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}))
+	result, err := resumed.Resume(context.Background(), initial.Metadata.ID, "image", "docker")
+	if err != nil || !result.WorkspaceRemoved || result.Metadata.ContinueCount != 1 || result.Metadata.ResumeCount != 1 {
+		t.Fatalf("resume = %#v, %v", result, err)
+	}
+}
+
+func TestContinueRejectsMovedSourceBranchAndPreservesCASRaceClone(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("codex")
+	initial, err := testManager(dataRoot, runnerFunc(func(context.Context, container.Invocation) error { return nil })).Start(context.Background(), repository, adapter, "image", "docker")
+	if err != nil || !initial.WorkspaceRemoved {
+		t.Fatalf("start = %#v, %v", initial, err)
+	}
+	rogue := runGit(t, repository, "commit-tree", initial.Metadata.ImportedCommit+"^{tree}", "-p", initial.Metadata.ImportedCommit, "-m", "external")
+	runGit(t, repository, "update-ref", "refs/heads/"+initial.Metadata.SessionBranch, rogue)
+	ran := false
+	preflight := testManager(dataRoot, runnerFunc(func(context.Context, container.Invocation) error { ran = true; return nil }))
+	if _, err := preflight.Continue(context.Background(), initial.Metadata.ID, "image", "docker"); err == nil || !strings.Contains(err.Error(), "no longer matches") || ran {
+		t.Fatalf("moved-ref continuation err=%v ran=%v", err, ran)
+	}
+	if got := runGit(t, repository, "rev-parse", initial.Metadata.SessionBranch); got != rogue {
+		t.Fatalf("preflight changed external ref to %s, want %s", got, rogue)
+	}
+
+	// Restore the trusted ref so preflight succeeds, then race the final CAS
+	// after the replacement clone has committed work.
+	runGit(t, repository, "update-ref", "refs/heads/"+initial.Metadata.SessionBranch, initial.Metadata.ImportedCommit)
+	race := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		workspace := invocationWorktree(t, invocation)
+		writeFile(t, filepath.Join(workspace, "race.txt"), "race")
+		runGit(t, workspace, "add", "race.txt")
+		runGit(t, workspace, "commit", "-m", "race")
+		external := runGit(t, repository, "commit-tree", initial.Metadata.ImportedCommit+"^{tree}", "-p", initial.Metadata.ImportedCommit, "-m", "external race")
+		runGit(t, repository, "update-ref", "refs/heads/"+initial.Metadata.SessionBranch, external)
+		return nil
+	}))
+	result, err := race.Continue(context.Background(), initial.Metadata.ID, "image", "docker")
+	if err == nil || result.WorkspaceRemoved || result.Metadata.State != StateInterrupted {
+		t.Fatalf("CAS race = %#v, %v", result, err)
+	}
+	if _, statErr := os.Stat(result.Metadata.Worktree); statErr != nil {
+		t.Fatalf("CAS race removed continuation clone: %v", statErr)
+	}
+	if got := runGit(t, repository, "rev-parse", initial.Metadata.SessionBranch); got == initial.Metadata.ImportedCommit {
+		t.Fatal("CAS race overwrote externally advanced branch")
+	}
+}
+
 func TestSelectedAgentStateSurvivesReplacementWithoutCrossAgentMounts(t *testing.T) {
 	for _, name := range agent.Supported() {
 		t.Run(name, func(t *testing.T) {

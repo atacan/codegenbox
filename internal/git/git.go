@@ -110,6 +110,34 @@ func CreateSessionClone(ctx context.Context, repositoryRoot, workspace, branch, 
 	return nil
 }
 
+// ValidateImportedSessionTip verifies that the source repository still has the
+// exact trusted session tip recorded in metadata. It deliberately resolves
+// only the generated local branch, never a user supplied ref or clone config.
+func ValidateImportedSessionTip(ctx context.Context, repositoryRoot, branch, importedCommit string) error {
+	if err := validateSessionBranch(branch); err != nil {
+		return err
+	}
+	if err := validateOID(importedCommit); err != nil {
+		return fmt.Errorf("invalid recorded imported commit: %w", err)
+	}
+	ref := workspaceRef(branch)
+	actual, err := run(ctx, repositoryRoot, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
+	if err != nil {
+		return fmt.Errorf("recorded session branch %q is missing or is not a commit: %w", branch, err)
+	}
+	if err := validateOID(actual); err != nil {
+		return fmt.Errorf("validate recorded session branch tip: %w", err)
+	}
+	if actual != importedCommit {
+		return fmt.Errorf("recorded session branch %q no longer matches trusted imported commit (have %s, want %s)", branch, actual, importedCommit)
+	}
+	return nil
+}
+
+// ValidateCommitOID exposes the repository-format-independent object ID
+// validation used for recorded session metadata.
+func ValidateCommitOID(oid string) error { return validateOID(oid) }
+
 // IsDirty reports whether the workspace has tracked or untracked changes. It
 // does not read the agent-writable clone config while it inspects the clone.
 func IsDirty(ctx context.Context, workspace string) (bool, error) {

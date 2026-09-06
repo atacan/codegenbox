@@ -215,6 +215,108 @@ func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Re
 	return m.finish(ctx, dataRoot, repository.Root, result, m.Runner.Run(ctx, invocation))
 }
 
+// Continue reconstructs a removed clean session clone at its recorded path and
+// runs the adapter originally selected for that session. Unlike Resume, it
+// requires that no filesystem object remains at the workspace path.
+func (m Manager) Continue(ctx context.Context, id, image, dockerBinary string) (Result, error) {
+	if m.Runner == nil {
+		return Result{}, fmt.Errorf("Docker runner is required")
+	}
+	if err := validateID(id); err != nil {
+		return Result{}, err
+	}
+	dataRoot, err := prepareDataRootWithoutRepository(m.DataRoot)
+	if err != nil {
+		return Result{}, err
+	}
+	release, err := acquireSessionLock(dataRoot, id)
+	if err != nil {
+		return Result{}, err
+	}
+	defer release()
+	if m.ImageChecker != nil {
+		if err := m.ImageChecker(ctx, dockerBinary, image); err != nil {
+			return Result{}, err
+		}
+	}
+
+	metadata, err := LoadMetadata(dataRoot, id)
+	if err != nil {
+		return Result{}, err
+	}
+	result := Result{Metadata: metadata}
+	if metadata.State == StateRunning {
+		return result, fmt.Errorf("session %q is still running; recover it only after its recorded container has stopped", id)
+	}
+	if metadata.State == StateDirty {
+		return result, fmt.Errorf("session %q has a retained dirty workspace; use codegenbox resume %s", id, id)
+	}
+	if err := validateContinuationMetadata(dataRoot, metadata); err != nil {
+		return result, err
+	}
+	adapter, err := agent.Lookup(metadata.Agent)
+	if err != nil {
+		return result, fmt.Errorf("recorded session adapter: %w", err)
+	}
+	repository, err := gitops.Discover(context.WithoutCancel(ctx), metadata.Repository)
+	if err != nil {
+		return result, fmt.Errorf("validate recorded repository: %w", err)
+	}
+	if repository.Root != metadata.Repository {
+		return result, fmt.Errorf("recorded repository identity no longer matches metadata")
+	}
+	if err := gitops.ValidateImportedSessionTip(context.WithoutCancel(ctx), repository.Root, metadata.SessionBranch, metadata.ImportedCommit); err != nil {
+		return result, err
+	}
+	if _, err := os.Lstat(metadata.Worktree); err == nil {
+		return result, fmt.Errorf("session workspace already exists: %s; use codegenbox resume %s for a retained workspace", metadata.Worktree, id)
+	} else if !os.IsNotExist(err) {
+		return result, fmt.Errorf("inspect session workspace path: %w", err)
+	}
+
+	now := m.Now
+	if now == nil {
+		now = time.Now
+	}
+	continued := now()
+	metadata.State, metadata.LastError, metadata.FinishedAt, metadata.ProcessID = StateRunning, "", nil, os.Getpid()
+	metadata.ContainerName, metadata.DockerBinary = "codegenbox-"+metadata.ID, dockerBinary
+	metadata.LastContinuedAt, metadata.ContinueCount = &continued, metadata.ContinueCount+1
+	result.Metadata = metadata
+	if err := WriteMetadata(dataRoot, metadata); err != nil {
+		return result, err
+	}
+	if err := gitops.CreateSessionClone(context.WithoutCancel(ctx), repository.Root, metadata.Worktree, metadata.SessionBranch, metadata.ImportedCommit); err != nil {
+		return m.recordContinuationSetupFailure(dataRoot, result, err)
+	}
+
+	privateDependencies, err := m.resolvePrivateDependencies()
+	if err != nil {
+		return m.finish(ctx, dataRoot, repository.Root, result, err)
+	}
+	stateMounts, err := m.resolveState(adapter)
+	if err != nil {
+		return m.finish(ctx, dataRoot, repository.Root, result, err)
+	}
+	invocation, err := container.BuildRunInvocation(dockerBinary, image, metadata.Worktree, adapter.Command, agent.EnvironmentPairs(adapter), adapter.Name, []string{repository.Root, filepath.Dir(repository.Root)}, stateMounts, m.Limits, container.ContainerName(metadata.ContainerName), privateDependencies)
+	if err != nil {
+		return m.finish(ctx, dataRoot, repository.Root, result, err)
+	}
+	return m.finish(ctx, dataRoot, repository.Root, result, m.Runner.Run(ctx, invocation))
+}
+
+func (m Manager) recordContinuationSetupFailure(dataRoot string, result Result, setupErr error) (Result, error) {
+	metadata := result.Metadata
+	now := m.Now
+	if now == nil {
+		now = time.Now
+	}
+	finished := now()
+	metadata.State, metadata.LastError, metadata.FinishedAt, metadata.ProcessID = StateInterrupted, errorText(setupErr), &finished, 0
+	result.Metadata = metadata
+	return result, errors.Join(setupErr, WriteMetadata(dataRoot, metadata))
+}
+
 // acquireSessionLock serializes transitions of one retained clone. Its file
 // contains only the owner PID; a dead lock owner is safely replaced. A reused
 // PID can only conservatively block a resume, never permit concurrent access.
@@ -557,6 +659,46 @@ func validateRetainedMetadata(dataRoot string, metadata Metadata) error {
 	}
 	if err := gitops.ValidateSessionClone(workspace); err != nil {
 		return fmt.Errorf("recorded workspace is not a self-contained clone: %w", err)
+	}
+	repository, err := canonicalExistingPath(metadata.Repository)
+	if err != nil {
+		return fmt.Errorf("resolve recorded repository: %w", err)
+	}
+	if repository != filepath.Clean(metadata.Repository) {
+		return fmt.Errorf("recorded repository path is not canonical")
+	}
+	return nil
+}
+
+// validateContinuationMetadata validates durable fields without probing a
+// retained clone. Continue intentionally reconstructs only an absent path;
+// Resume owns validation of an existing clone.
+func validateContinuationMetadata(dataRoot string, metadata Metadata) error {
+	if err := validateID(metadata.ID); err != nil {
+		return err
+	}
+	if metadata.Agent == "" || metadata.Repository == "" || metadata.Worktree == "" || metadata.BaseBranch == "" || metadata.BaseCommit == "" || metadata.ImportedCommit == "" {
+		return fmt.Errorf("session metadata is missing required fields for continuation")
+	}
+	if metadata.SessionBranch != "codegenbox/"+metadata.ID {
+		return fmt.Errorf("session metadata has an unexpected reserved branch")
+	}
+	if err := gitops.ValidateCommitOID(metadata.BaseCommit); err != nil {
+		return fmt.Errorf("invalid recorded base commit: %w", err)
+	}
+	if err := gitops.ValidateCommitOID(metadata.ImportedCommit); err != nil {
+		return fmt.Errorf("invalid recorded imported commit: %w", err)
+	}
+	workspaceRoot, err := prepareWorkspaceRoot(dataRoot)
+	if err != nil {
+		return err
+	}
+	workspace, err := filepath.Abs(metadata.Worktree)
+	if err != nil {
+		return fmt.Errorf("resolve recorded workspace: %w", err)
+	}
+	if filepath.Clean(workspace) != filepath.Join(workspaceRoot, metadata.ID) || !isWithin(workspace, workspaceRoot) {
+		return fmt.Errorf("recorded workspace is outside Codegenbox session storage")
 	}
 	repository, err := canonicalExistingPath(metadata.Repository)
 	if err != nil {

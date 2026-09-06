@@ -27,17 +27,20 @@ func TestNewIDIsReadableAndBranchSafe(t *testing.T) {
 
 func TestWriteMetadataRoundTripsRequiredFields(t *testing.T) {
 	started := time.Date(2026, 9, 3, 19, 30, 12, 0, time.FixedZone("CEST", 2*60*60))
+	continued := started.Add(time.Hour)
 	metadata := Metadata{
-		ID:             "project-20260903-193012-a82f",
-		Repository:     "/source/project",
-		Worktree:       "",
-		Agent:          "codex",
-		BaseBranch:     "main",
-		BaseCommit:     "abcdef",
-		SessionBranch:  "codegenbox/project-20260903-193012-a82f",
-		ImportedCommit: "123456",
-		StartedAt:      started,
-		State:          StateRunning,
+		ID:              "project-20260903-193012-a82f",
+		Repository:      "/source/project",
+		Worktree:        "",
+		Agent:           "codex",
+		BaseBranch:      "main",
+		BaseCommit:      "abcdef",
+		SessionBranch:   "codegenbox/project-20260903-193012-a82f",
+		ImportedCommit:  "123456",
+		StartedAt:       started,
+		LastContinuedAt: &continued,
+		ContinueCount:   2,
+		State:           StateRunning,
 	}
 	root := t.TempDir()
 	root, err := filepath.EvalSymlinks(root)
@@ -64,6 +67,19 @@ func TestWriteMetadataRoundTripsRequiredFields(t *testing.T) {
 	}
 	if !decoded.StartedAt.Equal(metadata.StartedAt) {
 		t.Fatalf("StartedAt = %s, want %s", decoded.StartedAt, metadata.StartedAt)
+	}
+	if decoded.LastContinuedAt == nil || !decoded.LastContinuedAt.Equal(continued) || decoded.ContinueCount != 2 {
+		t.Fatalf("continuation metadata = %#v", decoded)
+	}
+}
+
+func TestOlderMetadataWithoutContinuationFieldsDecodesToZeroValues(t *testing.T) {
+	var metadata Metadata
+	if err := json.Unmarshal([]byte(`{"id":"project-20260903-193012-a82f","state":"completed"}`), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.LastContinuedAt != nil || metadata.ContinueCount != 0 {
+		t.Fatalf("older metadata continuation fields = %#v", metadata)
 	}
 }
 

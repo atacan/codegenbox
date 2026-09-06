@@ -142,6 +142,21 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 			return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
 		}
 		return nil
+	case len(arguments) >= 1 && arguments[0] == "continue":
+		if len(arguments) != 2 || arguments[1] == "" {
+			return fmt.Errorf("usage: codegenbox continue <session-id>")
+		}
+		if _, err := manager.RecoverOrphans(ctx); err != nil {
+			return fmt.Errorf("recover interrupted sessions: %w", err)
+		}
+		result, runErr := manager.Continue(ctx, arguments[1], configured.Image, configured.DockerBinary)
+		if result.Metadata.ID != "" {
+			printResult(ctx, output, result)
+		}
+		if runErr != nil {
+			return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
+		}
+		return nil
 	default:
 		agentName, err := parseArguments(arguments)
 		if err != nil {
@@ -186,14 +201,14 @@ func parseArguments(arguments []string) (string, error) {
 			return arguments[1], nil
 		}
 	}
-	return "", fmt.Errorf("usage: codegenbox <agent> | codegenbox run <agent> | codegenbox resume <session-id> | codegenbox sessions | codegenbox doctor | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode")
+	return "", fmt.Errorf("usage: codegenbox <agent> | codegenbox run <agent> | codegenbox resume <session-id> | codegenbox continue <session-id> | codegenbox sessions | codegenbox doctor | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode")
 }
 
 func printResult(ctx context.Context, output io.Writer, result session.Result) {
 	metadata := result.Metadata
 	switch metadata.State {
 	case session.StateCompleted:
-		fmt.Fprintf(output, "Codegenbox session complete.\n\nBranch: %s\nTemporary workspace: removed\n", metadata.SessionBranch)
+		fmt.Fprintf(output, "Codegenbox session complete.\n\nBranch: %s\nTemporary workspace: removed\nContinue this branch: codegenbox continue %s\n", metadata.SessionBranch, metadata.ID)
 	case session.StateDirty:
 		fmt.Fprintf(output, "Codegenbox session stopped with uncommitted changes.\n\nWorkspace preserved: %s\nResume: codegenbox resume %s\n", metadata.Worktree, metadata.ID)
 	case session.StateInterrupted:

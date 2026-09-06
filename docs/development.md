@@ -87,7 +87,7 @@ permissions. It is not user configuration and must not become an arbitrary
 Docker user flag. Codegenbox rejects zero UID or GID, so do not run it with
 `sudo`.
 
-## Session lifecycle and resume
+## Session lifecycle, resume, and continue
 
 `codegenbox sessions` reads JSON metadata files in deterministic ID order and
 prints only ID, agent, state, workspace presence, and reserved branch. Invalid
@@ -99,12 +99,29 @@ session path, ordinary self-contained `.git` layout (no alternates, linked
 common directory, or symlinks), and recorded adapter before a new disposable
 container starts. A missing, corrupt, or unsafe clone is never cleaned up.
 
+`codegenbox continue <id>` also requires an explicit ID, but has the opposite
+workspace rule: it rejects any existing file, directory, or symlink at the
+recorded path and directs retained work to `resume`. It validates the recorded
+agent and repository, then resolves only the local generated
+`refs/heads/codegenbox/<id>` ref and requires it to exactly equal the recorded
+`ImportedCommit`. It creates a new self-contained clone at the same path,
+checks out that trusted tip on the same branch, and runs the originally
+recorded adapter with the normal selected-state mounts and isolation. It never
+fetches or adopts remote state; externally moved local session refs fail
+clearly. The original base commit remains the logical PR/diff base.
+
 After every run, including a resumed run, host Git inspects status only after
 the runner returns. It imports the fixed reserved clone ref only if it descends
 from the recorded base. First import atomically creates the branch; later
 imports atomically advance that same branch only from `ImportedCommit`. A CAS
 failure, source mismatch, or dirty clone preserves the session clone. Committed
 work imports even with remaining dirty files.
+
+Continuation uses the same atomic import and cleanup sequence. A successful
+clean continuation removes its reconstructed clone and leaves the session
+eligible for another continuation, including after a clean interrupted run
+whose committed tip was safely imported. Pushing is always explicit: run
+`codegenbox push <id>` again after continuation to update the same PR branch.
 
 ## Phase 6 hardening
 
@@ -121,11 +138,11 @@ Image compatibility uses `io.codegenbox.compatibility=1`; unlabelled Phase 3
 0.1 images remain supported, while a present incompatible label is rejected.
 
 Running metadata records the owner PID plus a unique Docker container name.
-At the next start/resume, a dead/absent PID is recovered only after Docker
+At the next start/resume/continue, a dead/absent PID is recovered only after Docker
 confirms that recorded container is stopped or explicitly absent. A live,
 running, or uninspectable container is never touched; legacy running records are retained
 for manual inspection. Dirty clones remain preserved after abrupt host failure.
-Resume and recovery acquire a per-session PID lock before changing metadata, so
+Resume, continue, and recovery acquire a per-session PID lock before changing metadata, so
 simultaneous processes cannot start or finalize the same clone concurrently.
 
 ## Phase 4 host GitHub workflow
