@@ -40,10 +40,21 @@ type Result struct {
 	WorkspaceRemoved bool
 }
 
+// StartOptions contains the small set of explicit user choices that become
+// durable session metadata. Callers may omit it to preserve the manual-only
+// default behavior.
+type StartOptions struct {
+	PostExitAction PostExitAction
+}
+
 // Start creates an independent session clone and runs its disposable
 // container. Once Runner.Run returns for any reason, clone status is inspected
 // and the expected session branch is imported before cleanup is considered.
-func (m Manager) Start(ctx context.Context, workingDirectory string, adapter agent.Adapter, image, dockerBinary string) (Result, error) {
+func (m Manager) Start(ctx context.Context, workingDirectory string, adapter agent.Adapter, image, dockerBinary string, options ...StartOptions) (Result, error) {
+	startOptions, err := parseStartOptions(options)
+	if err != nil {
+		return Result{}, err
+	}
 	if m.Runner == nil {
 		return Result{}, fmt.Errorf("Docker runner is required")
 	}
@@ -104,18 +115,19 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 	}
 
 	metadata := Metadata{
-		ID:            id,
-		Repository:    repository.Root,
-		Worktree:      workspace,
-		Agent:         adapter.Name,
-		BaseBranch:    repository.BaseBranch,
-		BaseCommit:    repository.BaseCommit,
-		SessionBranch: branch,
-		StartedAt:     now(),
-		State:         StateRunning,
-		ProcessID:     os.Getpid(),
-		ContainerName: "codegenbox-" + id,
-		DockerBinary:  dockerBinary,
+		ID:             id,
+		Repository:     repository.Root,
+		Worktree:       workspace,
+		Agent:          adapter.Name,
+		BaseBranch:     repository.BaseBranch,
+		BaseCommit:     repository.BaseCommit,
+		SessionBranch:  branch,
+		PostExitAction: startOptions.PostExitAction,
+		StartedAt:      now(),
+		State:          StateRunning,
+		ProcessID:      os.Getpid(),
+		ContainerName:  "codegenbox-" + id,
+		DockerBinary:   dockerBinary,
 	}
 	result := Result{Metadata: metadata}
 	if err := WriteMetadata(dataRoot, metadata); err != nil {
@@ -138,6 +150,16 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 	}
 	runErr := m.Runner.Run(ctx, invocation)
 	return m.finish(ctx, dataRoot, repository.Root, result, runErr)
+}
+
+func parseStartOptions(options []StartOptions) (StartOptions, error) {
+	if len(options) == 0 {
+		return StartOptions{}, nil
+	}
+	if len(options) != 1 || !validPostExitAction(options[0].PostExitAction) {
+		return StartOptions{}, fmt.Errorf("invalid session start options")
+	}
+	return options[0], nil
 }
 
 // Resume runs the adapter recorded in retained, validated metadata. An omitted
@@ -640,6 +662,9 @@ func validateRetainedMetadata(dataRoot string, metadata Metadata) error {
 	if err := validateID(metadata.ID); err != nil {
 		return err
 	}
+	if !validPostExitAction(metadata.PostExitAction) {
+		return fmt.Errorf("session metadata has an invalid post-exit action")
+	}
 	if metadata.Agent == "" || metadata.Repository == "" || metadata.Worktree == "" || metadata.BaseBranch == "" || metadata.BaseCommit == "" {
 		return fmt.Errorf("session metadata is missing required fields")
 	}
@@ -676,6 +701,9 @@ func validateRetainedMetadata(dataRoot string, metadata Metadata) error {
 func validateContinuationMetadata(dataRoot string, metadata Metadata) error {
 	if err := validateID(metadata.ID); err != nil {
 		return err
+	}
+	if !validPostExitAction(metadata.PostExitAction) {
+		return fmt.Errorf("session metadata has an invalid post-exit action")
 	}
 	if metadata.Agent == "" || metadata.Repository == "" || metadata.Worktree == "" || metadata.BaseBranch == "" || metadata.BaseCommit == "" || metadata.ImportedCommit == "" {
 		return fmt.Errorf("session metadata is missing required fields for continuation")

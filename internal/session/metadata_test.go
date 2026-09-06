@@ -37,6 +37,7 @@ func TestWriteMetadataRoundTripsRequiredFields(t *testing.T) {
 		BaseCommit:      "abcdef",
 		SessionBranch:   "codegenbox/project-20260903-193012-a82f",
 		ImportedCommit:  "123456",
+		PostExitAction:  PostExitActionOpenCompare,
 		StartedAt:       started,
 		LastContinuedAt: &continued,
 		ContinueCount:   2,
@@ -62,7 +63,7 @@ func TestWriteMetadataRoundTripsRequiredFields(t *testing.T) {
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatalf("decode metadata: %v", err)
 	}
-	if decoded.ID != metadata.ID || decoded.Repository != metadata.Repository || decoded.Worktree != metadata.Worktree || decoded.Agent != metadata.Agent || decoded.BaseBranch != metadata.BaseBranch || decoded.BaseCommit != metadata.BaseCommit || decoded.SessionBranch != metadata.SessionBranch || decoded.ImportedCommit != metadata.ImportedCommit || decoded.State != metadata.State {
+	if decoded.ID != metadata.ID || decoded.Repository != metadata.Repository || decoded.Worktree != metadata.Worktree || decoded.Agent != metadata.Agent || decoded.BaseBranch != metadata.BaseBranch || decoded.BaseCommit != metadata.BaseCommit || decoded.SessionBranch != metadata.SessionBranch || decoded.ImportedCommit != metadata.ImportedCommit || decoded.PostExitAction != metadata.PostExitAction || decoded.State != metadata.State {
 		t.Fatalf("metadata = %#v, want %#v", decoded, metadata)
 	}
 	if !decoded.StartedAt.Equal(metadata.StartedAt) {
@@ -73,13 +74,30 @@ func TestWriteMetadataRoundTripsRequiredFields(t *testing.T) {
 	}
 }
 
-func TestOlderMetadataWithoutContinuationFieldsDecodesToZeroValues(t *testing.T) {
+func TestOlderMetadataWithoutOptionalFieldsDecodesToZeroValues(t *testing.T) {
 	var metadata Metadata
 	if err := json.Unmarshal([]byte(`{"id":"project-20260903-193012-a82f","state":"completed"}`), &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.LastContinuedAt != nil || metadata.ContinueCount != 0 {
-		t.Fatalf("older metadata continuation fields = %#v", metadata)
+	if metadata.LastContinuedAt != nil || metadata.ContinueCount != 0 || metadata.PostExitAction != PostExitActionNone {
+		t.Fatalf("older metadata optional fields = %#v", metadata)
+	}
+}
+
+func TestWriteMetadataRejectsUnknownPostExitAction(t *testing.T) {
+	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "project-20260903-193012-a82f"
+	workspace := filepath.Join(root, "sessions", id)
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := Metadata{ID: id, Repository: "/source", Worktree: workspace, Agent: "codex", SessionBranch: "codegenbox/" + id, PostExitAction: "anything", State: StateDirty}
+	if err := WriteMetadata(root, metadata); err == nil {
+		t.Fatal("WriteMetadata accepted an unknown post-exit action")
 	}
 }
 

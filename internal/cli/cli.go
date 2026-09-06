@@ -28,6 +28,10 @@ type Environment struct {
 	// ImageChecker lets tests replace the host Docker inspection. Production
 	// leaves it nil and uses the real inspector below.
 	ImageChecker func(context.Context, string, string) error
+	// OpenCompareAfterPush lets tests replace the host-side automatic handoff.
+	// Production uses the same trusted push and browser path as the manual
+	// commands below.
+	OpenCompareAfterPush func(context.Context, session.Metadata) (host.CompareHandoff, error)
 }
 
 func Run(ctx context.Context, arguments []string, environment Environment) error {
@@ -63,6 +67,10 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		}
 	}
 	manager := session.Manager{DataRoot: configured.DataRoot, Runner: runner, Limits: container.ResourceLimits{PIDs: configured.Limits.PIDs, Memory: configured.Limits.Memory, CPUs: configured.Limits.CPUs}, ImageChecker: imageChecker}
+	openCompareAfterPush := environment.OpenCompareAfterPush
+	if openCompareAfterPush == nil {
+		openCompareAfterPush = host.PushAndOpenCompare
+	}
 	switch {
 	case len(arguments) == 1 && arguments[0] == "doctor":
 		checks := doctor.Run(ctx, doctor.ExecCommand{}, configured.DockerBinary, configured.Image, configured.DataRoot)
@@ -140,13 +148,7 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 			return fmt.Errorf("recover interrupted sessions: %w", err)
 		}
 		result, runErr := manager.Resume(ctx, arguments[1], configured.Image, configured.DockerBinary)
-		if result.Metadata.ID != "" {
-			printResult(ctx, output, style, result)
-		}
-		if runErr != nil {
-			return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
-		}
-		return nil
+		return finishSessionRun(ctx, output, style, result, runErr, openCompareAfterPush)
 	case len(arguments) >= 1 && arguments[0] == "continue":
 		if len(arguments) != 2 || arguments[1] == "" {
 			return fmt.Errorf("usage: codegenbox continue <session-id>")
@@ -155,19 +157,13 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 			return fmt.Errorf("recover interrupted sessions: %w", err)
 		}
 		result, runErr := manager.Continue(ctx, arguments[1], configured.Image, configured.DockerBinary)
-		if result.Metadata.ID != "" {
-			printResult(ctx, output, style, result)
-		}
-		if runErr != nil {
-			return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
-		}
-		return nil
+		return finishSessionRun(ctx, output, style, result, runErr, openCompareAfterPush)
 	default:
-		agentName, err := parseArguments(arguments)
+		start, err := parseStartArguments(arguments)
 		if err != nil {
 			return err
 		}
-		adapter, err := agent.Lookup(agentName)
+		adapter, err := agent.Lookup(start.Agent)
 		if err != nil {
 			return err
 		}
@@ -186,27 +182,79 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		if _, err := manager.RecoverOrphans(ctx); err != nil {
 			return fmt.Errorf("recover interrupted sessions: %w", err)
 		}
-		result, runErr := manager.Start(ctx, workingDirectory, adapter, configured.Image, configured.DockerBinary)
-		if result.Metadata.ID != "" {
-			printResult(ctx, output, style, result)
-		}
-		if runErr != nil {
-			return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
-		}
-		return nil
+		result, runErr := manager.Start(ctx, workingDirectory, adapter, configured.Image, configured.DockerBinary, session.StartOptions{PostExitAction: start.PostExitAction})
+		return finishSessionRun(ctx, output, style, result, runErr, openCompareAfterPush)
 	}
 }
 
 func parseArguments(arguments []string) (string, error) {
-	switch len(arguments) {
-	case 1:
-		return arguments[0], nil
-	case 2:
-		if arguments[0] == "run" {
-			return arguments[1], nil
+	start, err := parseStartArguments(arguments)
+	return start.Agent, err
+}
+
+type startArguments struct {
+	Agent          string
+	PostExitAction session.PostExitAction
+}
+
+func parseStartArguments(arguments []string) (startArguments, error) {
+	var agentName string
+	var options []string
+	switch {
+	case len(arguments) >= 1 && arguments[0] == "run":
+		if len(arguments) < 2 {
+			return startArguments{}, usageError()
+		}
+		agentName, options = arguments[1], arguments[2:]
+	case len(arguments) >= 1:
+		agentName, options = arguments[0], arguments[1:]
+	default:
+		return startArguments{}, usageError()
+	}
+	start := startArguments{Agent: agentName}
+	for _, option := range options {
+		switch option {
+		case "--open-pr":
+			if start.PostExitAction != session.PostExitActionNone {
+				return startArguments{}, usageError()
+			}
+			start.PostExitAction = session.PostExitActionOpenCompare
+		default:
+			return startArguments{}, usageError()
 		}
 	}
-	return "", fmt.Errorf("usage: codegenbox <agent> | codegenbox run <agent> | codegenbox resume <session-id> | codegenbox continue <session-id> | codegenbox sessions | codegenbox doctor | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode")
+	return start, nil
+}
+
+func usageError() error {
+	return fmt.Errorf("usage: codegenbox <agent> [--open-pr] | codegenbox run <agent> [--open-pr] | codegenbox resume <session-id> | codegenbox continue <session-id> | codegenbox sessions | codegenbox doctor | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode")
+}
+
+func finishSessionRun(ctx context.Context, output io.Writer, style terminal.Style, result session.Result, runErr error, openCompareAfterPush func(context.Context, session.Metadata) (host.CompareHandoff, error)) error {
+	if result.Metadata.ID != "" {
+		printResult(ctx, output, style, result)
+	}
+	if runErr != nil {
+		return fmt.Errorf("Codegenbox session did not complete: %w", runErr)
+	}
+	return runRequestedPostExitAction(ctx, output, style, result.Metadata, openCompareAfterPush)
+}
+
+func runRequestedPostExitAction(ctx context.Context, output io.Writer, style terminal.Style, metadata session.Metadata, openCompareAfterPush func(context.Context, session.Metadata) (host.CompareHandoff, error)) error {
+	if metadata.PostExitAction != session.PostExitActionOpenCompare || metadata.State != session.StateCompleted || metadata.ImportedCommit == "" || metadata.ImportedCommit == metadata.BaseCommit {
+		return nil
+	}
+	fmt.Fprintln(output, "\nGitHub handoff")
+	handoff, err := openCompareAfterPush(ctx, metadata)
+	if handoff.URL != "" {
+		printSummaryLine(output, "Comparison URL", handoff.URL)
+	}
+	if err != nil {
+		fmt.Fprintln(output, style.Warning("Automatic GitHub handoff failed: "+err.Error()))
+		return fmt.Errorf("automatic GitHub handoff: %w", err)
+	}
+	fmt.Fprintln(output, style.Success("Pushed "+metadata.SessionBranch+" and opened its GitHub comparison."))
+	return nil
 }
 
 func printResult(ctx context.Context, output io.Writer, style terminal.Style, result session.Result) {

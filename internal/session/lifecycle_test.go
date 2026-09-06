@@ -89,6 +89,78 @@ func TestLifecycleCommitSurvivesCleanWorktreeRemoval(t *testing.T) {
 	}
 }
 
+func TestLifecyclePersistsRequestedPostExitAction(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("codex")
+	manager := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		workspace := invocationWorktree(t, invocation)
+		writeFile(t, filepath.Join(workspace, "committed.txt"), "made in session\n")
+		runGit(t, workspace, "add", "committed.txt")
+		runGit(t, workspace, "commit", "-m", "session commit")
+		return nil
+	}))
+
+	result, err := manager.Start(context.Background(), repository, adapter, "image", "docker", StartOptions{PostExitAction: PostExitActionOpenCompare})
+	if err != nil || result.Metadata.PostExitAction != PostExitActionOpenCompare {
+		t.Fatalf("Start = %#v, %v", result, err)
+	}
+	if stored := readMetadata(t, dataRoot, result.Metadata.ID); stored.PostExitAction != PostExitActionOpenCompare {
+		t.Fatalf("stored metadata = %#v", stored)
+	}
+}
+
+func TestLifecycleStartRejectsUnknownPostExitAction(t *testing.T) {
+	adapter, _ := agent.Lookup("codex")
+	ran := false
+	manager := testManager(filepath.Join(t.TempDir(), "codegenbox-state"), runnerFunc(func(context.Context, container.Invocation) error {
+		ran = true
+		return nil
+	}))
+	if _, err := manager.Start(context.Background(), t.TempDir(), adapter, "image", "docker", StartOptions{PostExitAction: "unexpected"}); err == nil || ran {
+		t.Fatalf("Start accepted unknown action: err=%v ran=%v", err, ran)
+	}
+}
+
+func TestResumeAndContinueKeepRequestedPostExitAction(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	adapter, _ := agent.Lookup("codex")
+	initial := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		writeFile(t, filepath.Join(invocationWorktree(t, invocation), "dirty.txt"), "retain\n")
+		return nil
+	}))
+	dirty, err := initial.Start(context.Background(), repository, adapter, "image", "docker", StartOptions{PostExitAction: PostExitActionOpenCompare})
+	if err != nil || dirty.Metadata.State != StateDirty {
+		t.Fatalf("initial Start = %#v, %v", dirty, err)
+	}
+	resumed := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		workspace := invocationWorktree(t, invocation)
+		if err := os.Remove(filepath.Join(workspace, "dirty.txt")); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(workspace, "first.txt"), "first\n")
+		runGit(t, workspace, "add", "first.txt")
+		runGit(t, workspace, "commit", "-m", "first")
+		return nil
+	}))
+	completed, err := resumed.Resume(context.Background(), dirty.Metadata.ID, "image", "docker")
+	if err != nil || completed.Metadata.PostExitAction != PostExitActionOpenCompare || !completed.WorkspaceRemoved {
+		t.Fatalf("Resume = %#v, %v", completed, err)
+	}
+	continued := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		workspace := invocationWorktree(t, invocation)
+		writeFile(t, filepath.Join(workspace, "second.txt"), "second\n")
+		runGit(t, workspace, "add", "second.txt")
+		runGit(t, workspace, "commit", "-m", "second")
+		return nil
+	}))
+	continuedResult, err := continued.Continue(context.Background(), completed.Metadata.ID, "image", "docker")
+	if err != nil || continuedResult.Metadata.PostExitAction != PostExitActionOpenCompare || !continuedResult.WorkspaceRemoved {
+		t.Fatalf("Continue = %#v, %v", continuedResult, err)
+	}
+}
+
 func TestLifecycleSessionCloneIsSelfContainedAndGitUsable(t *testing.T) {
 	repository := newRepository(t)
 	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")

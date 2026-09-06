@@ -52,6 +52,13 @@ type PushResult struct {
 	GitHub *GitHubRemote
 }
 
+// CompareHandoff is the result of the opt-in host-side GitHub handoff. URL is
+// returned even when opening the browser fails, so callers can show a safe
+// recovery link without retrying the push.
+type CompareHandoff struct {
+	URL string
+}
+
 // CommandRunner lets tests observe argument boundaries without a shell.
 type CommandRunner interface {
 	Run(context.Context, string, []string, string) (string, error)
@@ -242,6 +249,51 @@ func PushSessionBranchWithRunner(ctx context.Context, metadata session.Metadata,
 		result.GitHub = &remote
 	}
 	return result, nil
+}
+
+// PushAndOpenCompare is the opt-in automatic counterpart to running push and
+// compare manually. It first requires a standard github.com origin, then uses
+// the existing fixed-ref non-force push before opening its compare page.
+func PushAndOpenCompare(ctx context.Context, metadata session.Metadata) (CompareHandoff, error) {
+	return PushAndOpenCompareWithRunner(ctx, metadata, execRunner{}, OpenBrowser)
+}
+
+// PushAndOpenCompareWithRunner keeps the handoff testable while preserving the
+// command boundaries used by the production host implementation.
+func PushAndOpenCompareWithRunner(ctx context.Context, metadata session.Metadata, runner CommandRunner, openBrowser func(context.Context, string) error) (CompareHandoff, error) {
+	if err := validateMetadata(metadata, true); err != nil {
+		return CompareHandoff{}, err
+	}
+	if metadata.State != session.StateCompleted || metadata.ImportedCommit == metadata.BaseCommit {
+		return CompareHandoff{}, fmt.Errorf("automatic GitHub handoff requires a completed session with a new imported commit")
+	}
+	if runner == nil {
+		return CompareHandoff{}, fmt.Errorf("host command runner is required")
+	}
+	if openBrowser == nil {
+		return CompareHandoff{}, fmt.Errorf("browser opener is required")
+	}
+	// Automatic publishing intentionally does not fall back to non-GitHub
+	// origins, even though the explicit push command supports them.
+	if _, err := DetectGitHubRemoteWithRunner(ctx, metadata.Repository, runner); err != nil {
+		return CompareHandoff{}, err
+	}
+	pushed, err := PushSessionBranchWithRunner(ctx, metadata, runner)
+	if err != nil {
+		return CompareHandoff{}, err
+	}
+	if pushed.GitHub == nil {
+		return CompareHandoff{}, fmt.Errorf("source origin changed to a non-GitHub remote during automatic handoff")
+	}
+	address, err := CompareURL(metadata, *pushed.GitHub)
+	if err != nil {
+		return CompareHandoff{}, err
+	}
+	handoff := CompareHandoff{URL: address}
+	if err := openBrowser(ctx, address); err != nil {
+		return handoff, err
+	}
+	return handoff, nil
 }
 
 // CreatePullRequest uses the host gh CLI only after the explicit pr command.

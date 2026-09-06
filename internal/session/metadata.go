@@ -22,29 +22,40 @@ const (
 	StateInterrupted State = "interrupted"
 )
 
+// PostExitAction is a user-selected, host-side action that may run after a
+// session has completed safely. It is persisted so resumed and continued
+// sessions keep the original request without relying on process state.
+type PostExitAction string
+
+const (
+	PostExitActionNone        PostExitAction = ""
+	PostExitActionOpenCompare PostExitAction = "open_compare"
+)
+
 // Metadata is the persistent record for one temporary session clone. A dirty
 // state means the clone is retained for a future implementation, but Phase 1
 // does not yet provide a resume command.
 type Metadata struct {
-	ID              string     `json:"id"`
-	Repository      string     `json:"repository"`
-	Worktree        string     `json:"worktree"`
-	Agent           string     `json:"agent"`
-	BaseBranch      string     `json:"base_branch"`
-	BaseCommit      string     `json:"base_commit"`
-	SessionBranch   string     `json:"session_branch"`
-	ImportedCommit  string     `json:"imported_commit,omitempty"`
-	StartedAt       time.Time  `json:"started_at"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
-	LastResumedAt   *time.Time `json:"last_resumed_at,omitempty"`
-	ResumeCount     int        `json:"resume_count,omitempty"`
-	LastContinuedAt *time.Time `json:"last_continued_at,omitempty"`
-	ContinueCount   int        `json:"continue_count,omitempty"`
-	ProcessID       int        `json:"process_id,omitempty"`
-	ContainerName   string     `json:"container_name,omitempty"`
-	DockerBinary    string     `json:"docker_binary,omitempty"`
-	State           State      `json:"state"`
-	LastError       string     `json:"last_error,omitempty"`
+	ID              string         `json:"id"`
+	Repository      string         `json:"repository"`
+	Worktree        string         `json:"worktree"`
+	Agent           string         `json:"agent"`
+	BaseBranch      string         `json:"base_branch"`
+	BaseCommit      string         `json:"base_commit"`
+	SessionBranch   string         `json:"session_branch"`
+	ImportedCommit  string         `json:"imported_commit,omitempty"`
+	PostExitAction  PostExitAction `json:"post_exit_action,omitempty"`
+	StartedAt       time.Time      `json:"started_at"`
+	FinishedAt      *time.Time     `json:"finished_at,omitempty"`
+	LastResumedAt   *time.Time     `json:"last_resumed_at,omitempty"`
+	ResumeCount     int            `json:"resume_count,omitempty"`
+	LastContinuedAt *time.Time     `json:"last_continued_at,omitempty"`
+	ContinueCount   int            `json:"continue_count,omitempty"`
+	ProcessID       int            `json:"process_id,omitempty"`
+	ContainerName   string         `json:"container_name,omitempty"`
+	DockerBinary    string         `json:"docker_binary,omitempty"`
+	State           State          `json:"state"`
+	LastError       string         `json:"last_error,omitempty"`
 }
 
 // LoadMetadata reads a single, validated metadata record without following an
@@ -216,6 +227,9 @@ func validateMetadataForListing(dataRoot string, metadata Metadata) error {
 	if err := validateID(metadata.ID); err != nil {
 		return err
 	}
+	if !validPostExitAction(metadata.PostExitAction) {
+		return fmt.Errorf("invalid post-exit action")
+	}
 	if metadata.Agent == "" || metadata.SessionBranch != "codegenbox/"+metadata.ID {
 		return fmt.Errorf("missing agent or reserved branch")
 	}
@@ -240,6 +254,10 @@ func validateMetadataForListing(dataRoot string, metadata Metadata) error {
 		return fmt.Errorf("workspace is outside expected session storage")
 	}
 	return nil
+}
+
+func validPostExitAction(action PostExitAction) bool {
+	return action == PostExitActionNone || action == PostExitActionOpenCompare
 }
 
 // NewID creates a readable, branch-safe session identifier.

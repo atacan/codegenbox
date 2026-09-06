@@ -34,12 +34,15 @@ defaults to release `0.3.0`; set `CODEGENBOX_VERSION` to install a different
 published version. The first agent run pulls the matching public development
 image automatically.
 
+To prepare and publish a release, run `scripts/release.sh MAJOR.MINOR.PATCH` from a clean `main` checkout.
+
 ## Use
 
 ```sh
 cd /path/to/a/git/repository
 codegenbox claude
 codegenbox codex
+codegenbox codex --open-pr
 codegenbox opencode
 codegenbox sessions
 codegenbox resume <session-id>
@@ -64,8 +67,31 @@ This version always uses the agent originally recorded for the session.
 Once a container has stopped, Codegenbox prints a host-side summary from the
 original repository: repository, recorded base branch and commit, reserved
 session branch, imported commit, commit subjects, and changed-file totals.
-The summary is informational; it never pushes, opens a browser, creates a pull
-request, or merges anything automatically.
+By default the summary is informational; it never pushes, opens a browser,
+creates a pull request, or merges anything automatically.
+
+To opt into a convenient host-side handoff when starting a session, add
+`--open-pr`:
+
+```sh
+codegenbox codex --open-pr
+```
+
+Codegenbox saves that request with the session metadata. After a successful,
+clean run that imports a new commit, the trusted host process verifies a
+standard `github.com` `origin`, pushes only the reserved session branch with
+the same non-force fixed refspec, and opens its GitHub compare page. The
+container never receives host GitHub write credentials, and Codegenbox never
+creates or merges a pull request automatically.
+
+Dirty, interrupted, failed, cleanup-incomplete, and no-change sessions do not
+run the automatic handoff. If the push or browser opening fails, the imported
+work and metadata remain safe, the compare URL is printed when available, and
+the usual `push` and `compare` commands remain available for recovery. A
+non-GitHub remote is not auto-pushed. `resume` and `continue` preserve the
+saved preference: each later clean run with new imported work updates the same
+reserved remote branch and opens the same compare URL, without creating another
+PR.
 
 After reviewing the summary, push only the generated branch explicitly:
 

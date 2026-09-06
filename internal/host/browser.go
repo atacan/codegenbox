@@ -9,8 +9,8 @@ import (
 )
 
 // OpenBrowser opens a validated GitHub compare URL with the host desktop
-// handler. It is called only by an explicit CLI command, never after a session
-// automatically. No shell is involved.
+// handler. It is called only by an explicit CLI command or an opt-in completed
+// session handoff. No shell is involved.
 func OpenBrowser(ctx context.Context, address string) error {
 	if len(address) == 0 || len(address) > 2048 || !strings.HasPrefix(address, "https://github.com/") || strings.ContainsAny(address, "\x00\r\n") {
 		return fmt.Errorf("invalid browser address")

@@ -185,6 +185,73 @@ func TestPushArgumentsAreFixed(t *testing.T) {
 	}
 }
 
+func TestAutomaticCompareHandoffPushesThenOpensOnlyGitHubOrigins(t *testing.T) {
+	metadata := testMetadata(t.TempDir())
+	metadata.State = session.StateCompleted
+	runner := &scriptRunner{repository: metadata.Repository, remoteURL: "https://github.com/acme/project.git", commit: metadata.ImportedCommit}
+	opened := ""
+	handoff, err := PushAndOpenCompareWithRunner(context.Background(), metadata, runner, func(_ context.Context, address string) error {
+		opened = address
+		return nil
+	})
+	want := "https://github.com/acme/project/compare/main...codegenbox/example-20260905-010203-a1b2?expand=1"
+	if err != nil || handoff.URL != want || opened != want {
+		t.Fatalf("automatic handoff = %#v, opened=%q, err=%v", handoff, opened, err)
+	}
+	var push []string
+	for _, call := range runner.calls {
+		if call.binary == "git" && contains(call.arguments, "push") {
+			push = call.arguments
+		}
+	}
+	if !contains(push, "--no-verify") || contains(push, "--force") {
+		t.Fatalf("automatic handoff used unsafe push arguments: %#v", push)
+	}
+
+	nonGitHub := &scriptRunner{repository: metadata.Repository, remoteURL: "https://example.com/acme/project.git", commit: metadata.ImportedCommit}
+	if _, err := PushAndOpenCompareWithRunner(context.Background(), metadata, nonGitHub, func(context.Context, string) error {
+		t.Fatal("opened browser for non-GitHub origin")
+		return nil
+	}); err == nil {
+		t.Fatal("automatic handoff accepted a non-GitHub origin")
+	}
+	for _, call := range nonGitHub.calls {
+		if call.binary == "git" && contains(call.arguments, "push") {
+			t.Fatalf("automatic handoff pushed non-GitHub origin: %#v", call.arguments)
+		}
+	}
+}
+
+func TestAutomaticCompareHandoffReturnsURLWhenBrowserFails(t *testing.T) {
+	metadata := testMetadata(t.TempDir())
+	metadata.State = session.StateCompleted
+	runner := &scriptRunner{repository: metadata.Repository, remoteURL: "git@github.com:acme/project.git", commit: metadata.ImportedCommit}
+	handoff, err := PushAndOpenCompareWithRunner(context.Background(), metadata, runner, func(context.Context, string) error {
+		return errors.New("desktop unavailable")
+	})
+	if err == nil || !strings.Contains(err.Error(), "desktop unavailable") || handoff.URL == "" {
+		t.Fatalf("browser failure = %#v, %v", handoff, err)
+	}
+}
+
+func TestAutomaticCompareHandoffRejectsIncompleteOrNoChangeSession(t *testing.T) {
+	metadata := testMetadata(t.TempDir())
+	runner := &scriptRunner{repository: metadata.Repository, remoteURL: "https://github.com/acme/project.git", commit: metadata.ImportedCommit}
+	if _, err := PushAndOpenCompareWithRunner(context.Background(), metadata, runner, func(context.Context, string) error { return nil }); err == nil {
+		t.Fatal("automatic handoff accepted incomplete metadata")
+	}
+	metadata.State = session.StateCompleted
+	metadata.ImportedCommit = metadata.BaseCommit
+	if _, err := PushAndOpenCompareWithRunner(context.Background(), metadata, runner, func(context.Context, string) error { return nil }); err == nil {
+		t.Fatal("automatic handoff accepted a no-change session")
+	}
+	for _, call := range runner.calls {
+		if call.binary == "git" && contains(call.arguments, "push") {
+			t.Fatalf("ineligible handoff pushed a branch: %#v", call.arguments)
+		}
+	}
+}
+
 type commandCall struct {
 	binary    string
 	arguments []string

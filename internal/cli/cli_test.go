@@ -3,12 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/codegenbox/codegenbox/internal/config"
+	"github.com/codegenbox/codegenbox/internal/host"
 	"github.com/codegenbox/codegenbox/internal/session"
 	"github.com/codegenbox/codegenbox/internal/terminal"
 	buildversion "github.com/codegenbox/codegenbox/internal/version"
@@ -135,5 +137,84 @@ func TestActionRowsUseOneCommandStylingConvention(t *testing.T) {
 		if !strings.HasPrefix(line, "- ") || !strings.Contains(line, ": \x1b[1;36mcodegenbox ") || !strings.HasSuffix(line, "\x1b[0m") {
 			t.Fatalf("action line does not use the shared command convention: %q", line)
 		}
+	}
+}
+
+func TestParseStartArgumentsAcceptsOnlyExplicitOpenPRFlag(t *testing.T) {
+	for _, test := range []struct {
+		arguments  []string
+		wantAgent  string
+		wantAction session.PostExitAction
+		wantError  bool
+	}{
+		{[]string{"codex"}, "codex", session.PostExitActionNone, false},
+		{[]string{"codex", "--open-pr"}, "codex", session.PostExitActionOpenCompare, false},
+		{[]string{"run", "claude", "--open-pr"}, "claude", session.PostExitActionOpenCompare, false},
+		{[]string{"codex", "--open-pr", "--open-pr"}, "", session.PostExitActionNone, true},
+		{[]string{"run", "codex", "--unknown"}, "", session.PostExitActionNone, true},
+	} {
+		t.Run(strings.Join(test.arguments, " "), func(t *testing.T) {
+			start, err := parseStartArguments(test.arguments)
+			if test.wantError {
+				if err == nil {
+					t.Fatal("parseStartArguments unexpectedly succeeded")
+				}
+				return
+			}
+			if err != nil || start.Agent != test.wantAgent || start.PostExitAction != test.wantAction {
+				t.Fatalf("parseStartArguments(%q) = %#v, %v", test.arguments, start, err)
+			}
+		})
+	}
+}
+
+func TestRequestedPostExitActionRunsOnlyForCompletedNewCommit(t *testing.T) {
+	metadata := session.Metadata{
+		ID:             "abc123",
+		BaseCommit:     "base",
+		ImportedCommit: "imported",
+		SessionBranch:  "codegenbox/abc123",
+		State:          session.StateCompleted,
+		PostExitAction: session.PostExitActionOpenCompare,
+	}
+	var output bytes.Buffer
+	calls := 0
+	err := runRequestedPostExitAction(context.Background(), &output, terminal.New(false), metadata, func(_ context.Context, got session.Metadata) (host.CompareHandoff, error) {
+		calls++
+		if got != metadata {
+			t.Fatalf("handoff metadata = %#v, want %#v", got, metadata)
+		}
+		return host.CompareHandoff{URL: "https://github.com/acme/project/compare/main...codegenbox/abc123?expand=1"}, nil
+	})
+	if err != nil || calls != 1 || !strings.Contains(output.String(), "Comparison URL: https://github.com/") || !strings.Contains(output.String(), "Pushed codegenbox/abc123 and opened") {
+		t.Fatalf("completed handoff output=%q calls=%d err=%v", output.String(), calls, err)
+	}
+
+	for _, ineligible := range []session.Metadata{
+		{PostExitAction: session.PostExitActionNone, State: session.StateCompleted, BaseCommit: "base", ImportedCommit: "imported"},
+		{PostExitAction: session.PostExitActionOpenCompare, State: session.StateDirty, BaseCommit: "base", ImportedCommit: "imported"},
+		{PostExitAction: session.PostExitActionOpenCompare, State: session.StateInterrupted, BaseCommit: "base", ImportedCommit: "imported"},
+		{PostExitAction: session.PostExitActionOpenCompare, State: session.StateCompleted, BaseCommit: "base", ImportedCommit: "base"},
+	} {
+		if err := runRequestedPostExitAction(context.Background(), &output, terminal.New(false), ineligible, func(context.Context, session.Metadata) (host.CompareHandoff, error) {
+			calls++
+			return host.CompareHandoff{}, nil
+		}); err != nil {
+			t.Fatalf("ineligible handoff = %v", err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("ineligible session ran automatic handoff %d times", calls)
+	}
+}
+
+func TestRequestedPostExitActionPrintsRecoveryURLOnBrowserFailure(t *testing.T) {
+	metadata := session.Metadata{BaseCommit: "base", ImportedCommit: "imported", State: session.StateCompleted, PostExitAction: session.PostExitActionOpenCompare}
+	var output bytes.Buffer
+	err := runRequestedPostExitAction(context.Background(), &output, terminal.New(false), metadata, func(context.Context, session.Metadata) (host.CompareHandoff, error) {
+		return host.CompareHandoff{URL: "https://github.com/acme/project/compare/main...codegenbox/abc123?expand=1"}, errors.New("desktop unavailable")
+	})
+	if err == nil || !strings.Contains(output.String(), "Comparison URL: https://github.com/") || !strings.Contains(output.String(), "Automatic GitHub handoff failed") {
+		t.Fatalf("browser failure output=%q err=%v", output.String(), err)
 	}
 }

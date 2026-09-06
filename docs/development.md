@@ -121,8 +121,11 @@ work imports even with remaining dirty files.
 Continuation uses the same atomic import and cleanup sequence. A successful
 clean continuation removes its reconstructed clone and leaves the session
 eligible for another continuation, including after a clean interrupted run
-whose committed tip was safely imported. Pushing is always explicit: run
-`codegenbox push <id>` again after continuation to update the same PR branch.
+whose committed tip was safely imported. By default, pushing remains explicit:
+run `codegenbox push <id>` again after continuation to update the same PR
+branch. A session started with `--open-pr` persists `open_compare` in its
+metadata, so each later clean resume or continuation with a new imported commit
+uses the same safe host-side fixed-ref push and opens the same compare URL.
 
 ## Phase 6 hardening
 
@@ -169,10 +172,17 @@ failed push leaves the generated local session branch and metadata intact.
 
 `codegenbox compare <id>` recognizes only standard `github.com` HTTPS, SSH, or
 SCP-style origin URLs and opens the generated compare page on the host. It is
-an explicit action. `codegenbox pr <id>` uses a host-installed `gh` only after
-an explicit request, passing fixed `--repo`, `--base`, `--head`, and `--fill`
-arguments derived from validated metadata. Users must push first; Codegenbox
-does not automatically merge or push as part of PR creation.
+an explicit action. `codegenbox codex --open-pr` is the opt-in exception to the
+manual handoff: its persisted `open_compare` metadata is considered only after
+a completed, clean run with a new imported commit. The host first confirms a
+standard GitHub origin, then performs the identical fixed-ref non-force push
+and opens the generated compare URL. It skips dirty, interrupted, failed,
+cleanup-incomplete, and no-change runs; a non-GitHub origin is not auto-pushed.
+If push fails, no page opens. A browser failure prints the URL without changing
+the imported work or metadata. `codegenbox pr <id>` uses a host-installed `gh`
+only after an explicit request, passing fixed `--repo`, `--base`, `--head`, and
+`--fill` arguments derived from validated metadata. Codegenbox never
+automatically creates or merges a pull request.
 
 Do not loosen the Docker mount builder for this feature. Neither host Git
 configuration, GitHub credentials, SSH private keys, nor writable GitHub/`gh`
