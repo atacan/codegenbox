@@ -25,9 +25,14 @@ ARG PNPM_VERSION=10.14.0
 ARG PYTHON_VERSION=3.12.11
 ARG UV_VERSION=0.7.20
 ARG GO_VERSION=1.24.6
-ARG RUST_VERSION=1.89.0
+ARG RUST_VERSION=1.97.0
 ARG RUSTUP_VERSION=1.28.2
 ARG SWIFT_VERSION=6.1.2
+
+# srcmv publishes Linux binaries only for x86_64, so build its pinned source
+# revision with the image's Rust toolchain for both supported architectures.
+ARG SRCMV_VERSION=0.6.2
+ARG SRCMV_REVISION=89138a9e96403d826781b4ed053ad5a72c56ca61
 
 # These are the vendor-published hashes for the architecture-specific Node and
 # Go archives.  They are arguments so a version bump must also intentionally
@@ -126,8 +131,16 @@ RUN case "${TARGETARCH}" in \
     && chmod 0755 /tmp/rustup-init \
     && /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_VERSION}" --no-modify-path \
     && rm /tmp/rustup-init \
+    && rustup component add rustfmt --toolchain "${RUST_VERSION}" \
     && rustc --version | grep --fixed-strings --quiet "${RUST_VERSION}" \
-    && cargo --version | grep --fixed-strings --quiet "${RUST_VERSION}"
+    && cargo --version | grep --fixed-strings --quiet "${RUST_VERSION}" \
+    && rustfmt --version
+
+# srcmv is a deterministic source-movement tool for coding-agent refactors.
+# Install its locked, immutable release revision rather than tracking a branch
+# or adding Homebrew solely for this binary.
+RUN cargo install --git https://github.com/atacan/srcmv.git --rev "${SRCMV_REVISION}" --locked srcmv-cli \
+    && srcmv --version | grep --fixed-strings --quiet "${SRCMV_VERSION}"
 
 # Swift's vendor tarballs are signed.  Import the project's published signing
 # keys and verify the detached signature before putting the toolchain on PATH.
@@ -174,6 +187,8 @@ RUN command -v claude \
     && command -v python3 \
     && command -v go \
     && command -v rustc \
+    && command -v rustfmt \
+    && command -v srcmv \
     && command -v cc \
     && command -v c++ \
     && command -v swiftc \
@@ -187,8 +202,12 @@ RUN command -v claude \
         && printf 'package main\nfunc main() {}\n' > /tmp/codegenbox-smoke/main.go \
         && go run /tmp/codegenbox-smoke/main.go \
         && printf 'fn main() {}\n' > /tmp/codegenbox-smoke/main.rs \
+        && printf '[package]\nname = "rust-smoke"\nversion = "0.1.0"\nedition = "2024"\n\n[[bin]]\nname = "rust-smoke"\npath = "main.rs"\n' > /tmp/codegenbox-smoke/Cargo.toml \
         && rustc /tmp/codegenbox-smoke/main.rs -o /tmp/codegenbox-smoke/rust-smoke \
         && /tmp/codegenbox-smoke/rust-smoke \
+        && rustfmt --version \
+        && cargo fmt --manifest-path /tmp/codegenbox-smoke/Cargo.toml --all -- --check \
+        && srcmv --version \
         && printf '#include <stdio.h>\nint main(void) { return 0; }\n' > /tmp/codegenbox-smoke/main.c \
         && cc /tmp/codegenbox-smoke/main.c -o /tmp/codegenbox-smoke/c-smoke \
         && /tmp/codegenbox-smoke/c-smoke \

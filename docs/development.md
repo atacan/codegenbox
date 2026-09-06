@@ -16,10 +16,11 @@ collisions, and the Docker socket. It never accepts a user mount flag.
 
 The production image replaces the Node proof image. It contains Ubuntu 24.04
 LTS, common interactive/source tools, C/C++ build tooling, Node/npm/pnpm,
-Python/uv, Go, Rust/cargo, Swift for Linux, and installed Claude Code, Codex,
-and OpenCode. Keep OS, toolchain, and agent versions explicit in Docker build
-inputs. Normal agent startup must not run `npx`, install a package, or depend
-on a package registry; the adapter commands above execute installed binaries.
+Python/uv, Go, Rust/cargo/rustfmt, `srcmv`, Swift for Linux, and installed
+Claude Code, Codex, and OpenCode. Keep OS, toolchain, and agent versions
+explicit in Docker build inputs. Normal agent startup must not run `npx`,
+install a package, or depend on a package registry; the adapter commands above
+execute installed binaries.
 
 The CLI default is `docker.io/atacandur/codegenbox:0.2.2`.
 `CODEGENBOX_IMAGE` remains the only supported image override for a compatible
