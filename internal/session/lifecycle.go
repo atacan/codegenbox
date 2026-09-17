@@ -119,6 +119,7 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 		Repository:     repository.Root,
 		Worktree:       workspace,
 		Agent:          adapter.Name,
+		Model:          adapter.Model,
 		BaseBranch:     repository.BaseBranch,
 		BaseCommit:     repository.BaseCommit,
 		SessionBranch:  branch,
@@ -196,7 +197,7 @@ func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Re
 	if err := validateRetainedMetadata(dataRoot, metadata); err != nil {
 		return Result{Metadata: metadata}, err
 	}
-	adapter, err := agent.Lookup(metadata.Agent)
+	adapter, err := agent.Resolve(metadata.Agent, metadata.Model)
 	if err != nil {
 		return Result{Metadata: metadata}, fmt.Errorf("recorded session adapter: %w", err)
 	}
@@ -276,7 +277,7 @@ func (m Manager) Continue(ctx context.Context, id, image, dockerBinary string) (
 	if err := validateContinuationMetadata(dataRoot, metadata); err != nil {
 		return result, err
 	}
-	adapter, err := agent.Lookup(metadata.Agent)
+	adapter, err := agent.Resolve(metadata.Agent, metadata.Model)
 	if err != nil {
 		return result, fmt.Errorf("recorded session adapter: %w", err)
 	}

@@ -19,7 +19,7 @@ func TestCheckImageCompatibility(t *testing.T) {
 		name, value string
 		err         error
 		wantErr     bool
-	}{{"compatible", "1\n", nil, false}, {"legacy unlabeled", "<no value>\n", nil, false}, {"incompatible", "2\n", nil, true}, {"inspect failure", "", errors.New("daemon unavailable"), true}} {
+	}{{"compatible", "2\n", nil, false}, {"legacy unlabeled", "<no value>\n", nil, true}, {"old contract", "1\n", nil, true}, {"incompatible", "3\n", nil, true}, {"inspect failure", "", errors.New("daemon unavailable"), true}} {
 		t.Run(test.name, func(t *testing.T) {
 			err := CheckImageCompatibility(context.Background(), inspectFunc(func(context.Context, string, ...string) (string, error) { return test.value, test.err }), "docker", "image:test")
 			if (err != nil) != test.wantErr {
@@ -47,7 +47,7 @@ func TestEnsureImageCompatibilityPullsOnlyWhenImageIsMissing(t *testing.T) {
 				if strings.Contains(strings.Join(args, " "), "image inspect") && len(calls) == 1 && test.inspectErr != nil {
 					return test.inspectErr.Error(), test.inspectErr
 				}
-				return "1\n", nil
+				return "2\n", nil
 			})
 			err := EnsureImageCompatibility(context.Background(), inspector, "docker", "image:test")
 			if (err != nil) != test.wantErr {

@@ -144,14 +144,26 @@ func TestParseStartArgumentsAcceptsOnlyExplicitOpenPRFlag(t *testing.T) {
 	for _, test := range []struct {
 		arguments  []string
 		wantAgent  string
+		wantModel  string
 		wantAction session.PostExitAction
 		wantError  bool
 	}{
-		{[]string{"codex"}, "codex", session.PostExitActionNone, false},
-		{[]string{"codex", "--open-pr"}, "codex", session.PostExitActionOpenCompare, false},
-		{[]string{"run", "claude", "--open-pr"}, "claude", session.PostExitActionOpenCompare, false},
-		{[]string{"codex", "--open-pr", "--open-pr"}, "", session.PostExitActionNone, true},
-		{[]string{"run", "codex", "--unknown"}, "", session.PostExitActionNone, true},
+		{[]string{"codex"}, "codex", "", session.PostExitActionNone, false},
+		{[]string{"codex", "--open-pr"}, "codex", "", session.PostExitActionOpenCompare, false},
+		{[]string{"run", "claude", "--open-pr"}, "claude", "", session.PostExitActionOpenCompare, false},
+		{[]string{"ori", "claude"}, "ori/claude", "", session.PostExitActionNone, false},
+		{[]string{"ori", "codex", "--model", "openai/gpt-5.2", "--open-pr"}, "ori/codex", "openai/gpt-5.2", session.PostExitActionOpenCompare, false},
+		{[]string{"run", "ori", "opencode", "--open-pr", "--model", "openrouter/auto"}, "ori/opencode", "openrouter/auto", session.PostExitActionOpenCompare, false},
+		{[]string{"ori"}, "", "", session.PostExitActionNone, true},
+		{[]string{"run", "ori"}, "", "", session.PostExitActionNone, true},
+		{[]string{"ori", "hermes"}, "", "", session.PostExitActionNone, true},
+		{[]string{"codex", "--model", "openrouter/auto"}, "", "", session.PostExitActionNone, true},
+		{[]string{"ori", "claude", "--model"}, "", "", session.PostExitActionNone, true},
+		{[]string{"ori", "claude", "--model", "--open-pr"}, "", "", session.PostExitActionNone, true},
+		{[]string{"ori", "claude", "--model", "two models"}, "", "", session.PostExitActionNone, true},
+		{[]string{"ori", "claude", "--model", "openrouter/auto", "--model", "openai/gpt-5.2"}, "", "", session.PostExitActionNone, true},
+		{[]string{"codex", "--open-pr", "--open-pr"}, "", "", session.PostExitActionNone, true},
+		{[]string{"run", "codex", "--unknown"}, "", "", session.PostExitActionNone, true},
 	} {
 		t.Run(strings.Join(test.arguments, " "), func(t *testing.T) {
 			start, err := parseStartArguments(test.arguments)
@@ -161,7 +173,7 @@ func TestParseStartArgumentsAcceptsOnlyExplicitOpenPRFlag(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || start.Agent != test.wantAgent || start.PostExitAction != test.wantAction {
+			if err != nil || start.Agent != test.wantAgent || start.Model != test.wantModel || start.PostExitAction != test.wantAction {
 				t.Fatalf("parseStartArguments(%q) = %#v, %v", test.arguments, start, err)
 			}
 		})

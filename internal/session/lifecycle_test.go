@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -633,6 +634,53 @@ func TestResumeUsesRecordedAdapterAndAtomicallyAdvancesImportedBranch(t *testing
 	}
 	if got := runGit(t, repository, "rev-parse", "main"); got != mainBefore {
 		t.Fatalf("main changed from %q to %q", mainBefore, got)
+	}
+}
+
+func TestOriAdapterAndModelPersistAcrossResumeAndContinue(t *testing.T) {
+	repository := newRepository(t)
+	dataRoot := filepath.Join(t.TempDir(), "codegenbox-state")
+	const model = "openai/gpt-5.2"
+	adapter, err := agent.Resolve(agent.OriCodex, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCommand := []string{"ori", "codex", "--model", model, "--dangerously-bypass-approvals-and-sandbox"}
+	assertCommand := func(invocation container.Invocation) {
+		t.Helper()
+		if got := invocation.Args[len(invocation.Args)-len(wantCommand):]; !reflect.DeepEqual(got, wantCommand) {
+			t.Fatalf("Ori command = %#v, want %#v", got, wantCommand)
+		}
+		mounts := valuesAfterInvocation(invocation.Args, "--mount")
+		if len(mounts) != 3 || !strings.Contains(mounts[1], "dst=/home/agent/.ori") || !strings.Contains(mounts[2], "dst=/home/agent/.codex") {
+			t.Fatalf("Ori/Codex mounts = %#v", mounts)
+		}
+	}
+
+	initial, err := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		assertCommand(invocation)
+		workspace := invocationWorktree(t, invocation)
+		writeFile(t, filepath.Join(workspace, "dirty.txt"), "keep")
+		return nil
+	})).Start(context.Background(), repository, adapter, "image", "docker")
+	if err != nil || initial.Metadata.Agent != agent.OriCodex || initial.Metadata.Model != model || initial.Metadata.State != StateDirty {
+		t.Fatalf("Ori start = %#v, %v", initial, err)
+	}
+
+	resumed, err := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		assertCommand(invocation)
+		return os.Remove(filepath.Join(invocationWorktree(t, invocation), "dirty.txt"))
+	})).Resume(context.Background(), initial.Metadata.ID, "image", "docker")
+	if err != nil || !resumed.WorkspaceRemoved || resumed.Metadata.Agent != agent.OriCodex || resumed.Metadata.Model != model {
+		t.Fatalf("Ori resume = %#v, %v", resumed, err)
+	}
+
+	continued, err := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+		assertCommand(invocation)
+		return nil
+	})).Continue(context.Background(), initial.Metadata.ID, "image", "docker")
+	if err != nil || !continued.WorkspaceRemoved || continued.Metadata.Agent != agent.OriCodex || continued.Metadata.Model != model {
+		t.Fatalf("Ori continue = %#v, %v", continued, err)
 	}
 }
 

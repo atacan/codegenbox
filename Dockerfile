@@ -10,7 +10,7 @@
 ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
 FROM ${UBUNTU_IMAGE}
 
-LABEL io.codegenbox.compatibility="1"
+LABEL io.codegenbox.compatibility="2"
 
 ARG TARGETARCH
 ARG BUILDARCH
@@ -47,6 +47,9 @@ ARG GO_SHA256_ARM64=124ea6033a8bf98aa9fbab53e58d134905262d45a022af3a90b73320f3c3
 ARG CLAUDE_CODE_VERSION=2.1.261
 ARG CODEX_VERSION=0.153.4
 ARG OPENCODE_VERSION=1.18.29
+ARG ORI_VERSION=0.14.3+6e62568
+ARG ORI_SHA256_AMD64=a5f8ae821626ed93c206c1624e7c2c6c97f227a800ba6cb939b849c01948212b
+ARG ORI_SHA256_ARM64=e61d75d078c1e3485e09934591fcaeab9bcfb0a7cace342fb362df336b527045
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -166,7 +169,7 @@ RUN case "${TARGETARCH}" in \
 
 # Pin npm and pnpm before installing the agent packages.  npm runs the
 # OpenCode package's required postinstall hook, selecting the matching native
-# opencode binary while leaving all three launchers directly on PATH.
+# opencode binary while leaving all three native launchers directly on PATH.
 RUN npm install --global --no-audit --no-fund "npm@${NPM_VERSION}" "pnpm@${PNPM_VERSION}" \
     && npm --version | grep --fixed-strings --quiet "${NPM_VERSION}" \
     && pnpm --version | grep --fixed-strings --quiet "${PNPM_VERSION}" \
@@ -176,6 +179,21 @@ RUN npm install --global --no-audit --no-fund "npm@${NPM_VERSION}" "pnpm@${PNPM_
     && command -v opencode \
     && npm cache clean --force
 
+# Ori is a standalone binary. Download the immutable release asset directly
+# instead of executing its installer, and verify the target-specific checksum.
+RUN case "${TARGETARCH}" in \
+        amd64) ori_arch=x64; ori_sha256="${ORI_SHA256_AMD64}" ;; \
+        arm64) ori_arch=arm64; ori_sha256="${ORI_SHA256_ARM64}" ;; \
+        *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && ori_tag="cli-${ORI_VERSION//+/-}" \
+    && ori_asset="ori-linux-${ori_arch}" \
+    && curl --fail --location --silent --show-error "https://github.com/OpenRouterLabs/ori-releases/releases/download/${ori_tag}/${ori_asset}" -o /tmp/ori \
+    && echo "${ori_sha256}  /tmp/ori" | sha256sum --check --strict \
+    && install -m 0755 /tmp/ori /usr/local/bin/ori \
+    && rm /tmp/ori \
+    && ORI_NO_UPDATE_CHECK=1 ORI_TELEMETRY=0 ori --version | grep --fixed-strings --quiet "${ORI_VERSION}"
+
 # Ensure every tool is present for the target platform.  Full executable smoke
 # tests run only on a native builder: QEMU can itself crash otherwise-valid
 # target binaries, as it is an emulator rather than the release runtime. CI
@@ -183,6 +201,7 @@ RUN npm install --global --no-audit --no-fund "npm@${NPM_VERSION}" "pnpm@${PNPM_
 RUN command -v claude \
     && command -v codex \
     && command -v opencode \
+    && command -v ori \
     && command -v node \
     && command -v python3 \
     && command -v go \
@@ -196,6 +215,7 @@ RUN command -v claude \
         claude --version \
         && codex --version \
         && opencode --version \
+        && ORI_NO_UPDATE_CHECK=1 ORI_TELEMETRY=0 ori --version \
         && node --input-type=module --eval 'if (40 + 2 !== 42) process.exit(1)' \
         && python3 -c 'assert 40 + 2 == 42' \
         && install -d /tmp/codegenbox-smoke \
@@ -232,7 +252,7 @@ RUN command -v claude \
 RUN groupadd --gid 10001 agent \
     && useradd --uid 10001 --gid agent --create-home --home-dir /home/agent --shell /bin/bash agent \
     && rm -rf /home/agent \
-    && install -d --owner=agent --group=agent --mode=0755 /workspace /home/agent/.claude /home/agent/.codex /home/agent/.config/opencode /home/agent/.local/share/opencode \
+    && install -d --owner=agent --group=agent --mode=0755 /workspace /home/agent/.claude /home/agent/.codex /home/agent/.ori /home/agent/.config/opencode /home/agent/.local/share/opencode \
     && find /home/agent -type d -exec chmod 1777 {} +
 
 # System toolchains stay immutable under /opt. Package-manager caches, user

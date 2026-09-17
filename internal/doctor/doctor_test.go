@@ -15,7 +15,7 @@ func (f commandFunc) Output(ctx context.Context, name string, args ...string) (s
 func TestRunReportsEachReadinessCheck(t *testing.T) {
 	checks := Run(context.Background(), commandFunc(func(_ context.Context, _ string, args ...string) (string, error) {
 		if strings.Contains(strings.Join(args, " "), "inspect") {
-			return "1\n", nil
+			return "2\n", nil
 		}
 		return "ok", nil
 	}), "docker", "image", t.TempDir())

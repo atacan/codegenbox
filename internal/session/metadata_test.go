@@ -32,7 +32,8 @@ func TestWriteMetadataRoundTripsRequiredFields(t *testing.T) {
 		ID:              "project-20260903-193012-a82f",
 		Repository:      "/source/project",
 		Worktree:        "",
-		Agent:           "codex",
+		Agent:           "ori/codex",
+		Model:           "openai/gpt-5.2",
 		BaseBranch:      "main",
 		BaseCommit:      "abcdef",
 		SessionBranch:   "codegenbox/project-20260903-193012-a82f",
@@ -63,7 +64,7 @@ func TestWriteMetadataRoundTripsRequiredFields(t *testing.T) {
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatalf("decode metadata: %v", err)
 	}
-	if decoded.ID != metadata.ID || decoded.Repository != metadata.Repository || decoded.Worktree != metadata.Worktree || decoded.Agent != metadata.Agent || decoded.BaseBranch != metadata.BaseBranch || decoded.BaseCommit != metadata.BaseCommit || decoded.SessionBranch != metadata.SessionBranch || decoded.ImportedCommit != metadata.ImportedCommit || decoded.PostExitAction != metadata.PostExitAction || decoded.State != metadata.State {
+	if decoded.ID != metadata.ID || decoded.Repository != metadata.Repository || decoded.Worktree != metadata.Worktree || decoded.Agent != metadata.Agent || decoded.Model != metadata.Model || decoded.BaseBranch != metadata.BaseBranch || decoded.BaseCommit != metadata.BaseCommit || decoded.SessionBranch != metadata.SessionBranch || decoded.ImportedCommit != metadata.ImportedCommit || decoded.PostExitAction != metadata.PostExitAction || decoded.State != metadata.State {
 		t.Fatalf("metadata = %#v, want %#v", decoded, metadata)
 	}
 	if !decoded.StartedAt.Equal(metadata.StartedAt) {
@@ -79,7 +80,7 @@ func TestOlderMetadataWithoutOptionalFieldsDecodesToZeroValues(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"id":"project-20260903-193012-a82f","state":"completed"}`), &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.LastContinuedAt != nil || metadata.ContinueCount != 0 || metadata.PostExitAction != PostExitActionNone {
+	if metadata.LastContinuedAt != nil || metadata.ContinueCount != 0 || metadata.PostExitAction != PostExitActionNone || metadata.Model != "" {
 		t.Fatalf("older metadata optional fields = %#v", metadata)
 	}
 }

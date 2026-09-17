@@ -75,9 +75,21 @@ type StateMount struct {
 }
 
 var allowedDestinations = map[string]map[string]bool{
-	"claude":   {"/home/agent/.claude": true},
-	"codex":    {"/home/agent/.codex": true},
-	"opencode": {"/home/agent/.config/opencode": true, "/home/agent/.local/share/opencode": true},
+	"claude":       {"/home/agent/.claude": true},
+	"codex":        {"/home/agent/.codex": true},
+	"opencode":     {"/home/agent/.config/opencode": true, "/home/agent/.local/share/opencode": true},
+	"ori/claude":   {"/home/agent/.ori": true, "/home/agent/.claude": true},
+	"ori/codex":    {"/home/agent/.ori": true, "/home/agent/.codex": true},
+	"ori/opencode": {"/home/agent/.ori": true, "/home/agent/.config/opencode": true, "/home/agent/.local/share/opencode": true},
+}
+
+var allowedStateSources = map[string]map[string]bool{
+	"claude":       {"claude": true},
+	"codex":        {"codex": true},
+	"opencode":     {"opencode-config": true, "opencode-data": true},
+	"ori/claude":   {"ori": true, "claude": true},
+	"ori/codex":    {"ori": true, "codex": true},
+	"ori/opencode": {"ori": true, "opencode-config": true, "opencode-data": true},
 }
 
 func BuildRunInvocation(binary, image, workspacePath string, command []string, environment []string, selectedAgent string, protectedSources []string, stateMounts []StateMount, options ...any) (Invocation, error) {
@@ -339,7 +351,7 @@ func validateStateMount(agent string, mount StateMount, workspacePath string, pr
 		}
 	}
 	for name, path := range canonicalAgentStatePaths() {
-		if name == agent || (agent == "opencode" && strings.HasPrefix(name, "opencode-")) {
+		if allowedStateSources[agent][name] {
 			continue
 		}
 		if source == path || isWithin(source, path) || isWithin(path, source) {
@@ -411,7 +423,7 @@ func canonicalAgentStatePaths() map[string]string {
 	if xdgData == "" {
 		xdgData = filepath.Join(home, ".local", "share")
 	}
-	raw := map[string]string{"claude": filepath.Join(home, ".claude"), "codex": filepath.Join(home, ".codex"), "opencode-config": filepath.Join(xdgConfig, "opencode"), "opencode-data": filepath.Join(xdgData, "opencode")}
+	raw := map[string]string{"claude": filepath.Join(home, ".claude"), "codex": filepath.Join(home, ".codex"), "opencode-config": filepath.Join(xdgConfig, "opencode"), "opencode-data": filepath.Join(xdgData, "opencode"), "ori": filepath.Join(home, ".ori")}
 	result := make(map[string]string, len(raw))
 	for name, path := range raw {
 		if canonical, err := canonicalExistingPath(path); err == nil {

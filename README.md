@@ -44,6 +44,9 @@ codegenbox claude
 codegenbox codex
 codegenbox codex --open-pr
 codegenbox opencode
+codegenbox ori claude
+codegenbox ori codex --model openai/gpt-5.2
+codegenbox ori opencode --open-pr
 codegenbox sessions
 codegenbox resume <session-id>
 codegenbox continue <session-id>
@@ -60,7 +63,30 @@ workspace path or silently chooses a session. Use `resume <id>` for a retained
 dirty or interrupted workspace. Use `continue <id>` only after a clean
 workspace was removed: it reconstructs that exact workspace from the trusted
 local `codegenbox/<id>` tip and records another run on the same session branch.
-This version always uses the agent originally recorded for the session.
+This version always uses the agent originally recorded for the session. Ori
+sessions also retain an explicitly selected model.
+
+### Ori harnesses
+
+Ori wraps an installed coding harness with OpenRouter configuration. Install
+Ori on the host and complete its global login once before starting an Ori
+session:
+
+```sh
+curl -fsSL https://openrouter.ai/labs/ori/install.sh | bash
+ori login
+```
+
+Do not use `ori login --local`: it writes credentials into the current
+repository, while Codegenbox deliberately mounts only global `~/.ori` state.
+The host Ori executable is used only for login; Codegenbox runs its pinned Ori
+binary inside the container.
+
+The supported composed commands are `codegenbox ori claude`, `codegenbox ori
+codex`, and `codegenbox ori opencode`, with equivalent `codegenbox run ori ...`
+forms. Add `--model <model-id>` to select an OpenRouter model for that session;
+Codegenbox records the model and reuses it on `resume` and `continue`. Arbitrary
+Ori or child-harness arguments are not accepted.
 
 ## Host GitHub workflow
 
@@ -142,6 +168,9 @@ startup:
 | Claude Code | `claude` |
 | Codex | `codex --dangerously-bypass-approvals-and-sandbox` |
 | OpenCode | `opencode` |
+| Ori + Claude Code | `ori claude [--model <model-id>]` |
+| Ori + Codex | `ori codex [--model <model-id>] --dangerously-bypass-approvals-and-sandbox` |
+| Ori + OpenCode | `ori opencode [--model <model-id>]` |
 
 Codex's bypass flag applies only inside Codegenbox's existing container
 boundary; it does not add host mounts or privileges. The published image index
@@ -161,7 +190,7 @@ build or publish images during a normal session.
 ## Persistent agent state
 
 Codegenbox gives each run a synthetic container home, `/home/agent`; it never
-mounts host `$HOME`. State is mounted read-write because all three CLIs can
+mounts host `$HOME`. State is mounted read-write because the CLIs can
 write login refresh data, settings, or conversation history.
 
 | Agent | Host path assumption | Container path/environment | Override |
@@ -169,11 +198,14 @@ write login refresh data, settings, or conversation history.
 | Claude Code | `~/.claude` | `/home/agent/.claude`, `HOME=/home/agent` | `CODEGENBOX_CLAUDE_STATE_DIR` |
 | Codex | `~/.codex` | `/home/agent/.codex`, `HOME`, `CODEX_HOME` | `CODEGENBOX_CODEX_STATE_DIR` |
 | OpenCode | `$XDG_CONFIG_HOME/opencode` (or `~/.config/opencode`) and `$XDG_DATA_HOME/opencode` (or `~/.local/share/opencode`) | matching paths under `/home/agent`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | `CODEGENBOX_OPENCODE_CONFIG_DIR`, `CODEGENBOX_OPENCODE_DATA_DIR` |
+| Ori | `~/.ori` | `/home/agent/.ori`, `HOME=/home/agent` | `CODEGENBOX_ORI_STATE_DIR` |
 
-Only the selected adapter's paths are created/mounted. An override must name
-that direct agent-state directory; Codegenbox rejects host home, generic
-config/state parents, known cross-agent defaults, commas, and mount collisions.
-It has no user-controlled arbitrary mount flags.
+Direct adapters mount only their own paths. An Ori adapter mounts `~/.ori` plus
+only its selected child harness's paths; for example, Ori/Codex receives
+`.ori` and `.codex`, but not Claude or OpenCode state. An override must name
+that direct state directory; Codegenbox rejects host home, generic config/state
+parents, known cross-agent defaults, commas, and mount collisions. It has no
+user-controlled arbitrary mount flags.
 
 The default Codegenbox storage root is `~/.local/share/codegenbox` (or
 `$XDG_DATA_HOME/codegenbox`); set `CODEGENBOX_DATA_DIR` to override it. This
@@ -250,8 +282,8 @@ The final Docker command is audited before execution: it must retain its fixed
 workspace/selected-state mounts, `--rm`, dropped capabilities, and
 no-new-privileges; privileged mode, host network/PID namespaces, Docker
 socket, and legacy volume flags are rejected. New images carry
-`io.codegenbox.compatibility=1`; existing unlabelled 0.1 images remain
-supported, while a present incompatible marker is rejected. Dead `running`
+`io.codegenbox.compatibility=2`; older, unlabelled, or otherwise incompatible
+images are rejected before agent state is mounted. Dead `running`
 session records are recovered only after the recorded named container is
 confirmed stopped or explicitly reported absent; Docker inspection failures
 leave the clone untouched. Dirty clones are retained.
@@ -262,7 +294,10 @@ Use a temporary Git repository and, one agent at a time, run the corresponding
 Codegenbox command, complete its ordinary login (if needed), create a short
 conversation, exit with an uncommitted edit, and run `codegenbox resume <id>`.
 Verify that its own CLI offers/continues the prior conversation and login, then
-commit or remove the edit and exit. Repeat for Claude, Codex, and OpenCode.
+commit or remove the edit and exit. Repeat for Claude, Codex, and OpenCode,
+then for each supported Ori composition after completing global `ori login`.
+For an Ori run, verify that both OpenRouter authentication and the child
+harness's history persist and that an explicit model survives resume.
 Check `codegenbox sessions` between runs; it must show no credentials. Do not
 copy or print state files. The structural tests cover mount isolation; this
 manual check is required because CI intentionally has no real credentials.

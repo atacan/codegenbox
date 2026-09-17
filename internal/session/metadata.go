@@ -40,6 +40,7 @@ type Metadata struct {
 	Repository      string         `json:"repository"`
 	Worktree        string         `json:"worktree"`
 	Agent           string         `json:"agent"`
+	Model           string         `json:"model,omitempty"`
 	BaseBranch      string         `json:"base_branch"`
 	BaseCommit      string         `json:"base_commit"`
 	SessionBranch   string         `json:"session_branch"`

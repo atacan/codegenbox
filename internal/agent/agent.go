@@ -7,26 +7,31 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/codegenbox/codegenbox/internal/container"
 )
 
 const (
-	Claude   = "claude"
-	Codex    = "codex"
-	OpenCode = "opencode"
+	Claude      = "claude"
+	Codex       = "codex"
+	OpenCode    = "opencode"
+	OriClaude   = "ori/claude"
+	OriCodex    = "ori/codex"
+	OriOpenCode = "ori/opencode"
 )
 
 const containerHome = "/home/agent"
 
-// Adapter owns a fixed executable, its environment, and the state locations it
-// needs. Callers cannot add command arguments or mounts.
+// Adapter owns a resolved executable command, its environment, and the state
+// locations it needs. Callers cannot append arbitrary arguments or mounts.
 type Adapter struct {
 	Name        string
 	Command     []string
 	Environment map[string]string
 	State       []StateLocation
 	Description string
+	Model       string
 }
 
 // StateLocation maps one deliberately narrow host directory to a CLI's normal
@@ -37,10 +42,19 @@ type StateLocation struct {
 	Destination string
 }
 
-// Lookup returns one of the Phase 3 adapters. The production image installs
-// all three CLI executables, so adapters invoke their fixed commands directly.
+// Lookup resolves an adapter without a per-session model override.
 func Lookup(name string) (Adapter, error) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
+	return Resolve(name, "")
+}
+
+// Resolve returns a direct or composed adapter. A model is accepted only for
+// Ori adapters and becomes part of their fixed, recorded command.
+func Resolve(name, model string) (Adapter, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if err := validateModel(name, model); err != nil {
+		return Adapter{}, err
+	}
+	switch name {
 	case Claude:
 		return Adapter{Name: Claude, Command: []string{"claude"}, Environment: homeEnvironment(), State: []StateLocation{{Key: "CLAUDE_STATE_DIR", Destination: containerHome + "/.claude"}}, Description: "Runs Claude Code with only ~/.claude state mounted at the synthetic container home."}, nil
 	case Codex:
@@ -52,15 +66,61 @@ func Lookup(name string) (Adapter, error) {
 		environment["XDG_CONFIG_HOME"] = containerHome + "/.config"
 		environment["XDG_DATA_HOME"] = containerHome + "/.local/share"
 		return Adapter{Name: OpenCode, Command: []string{"opencode"}, Environment: environment, State: []StateLocation{{Key: "OPENCODE_CONFIG_DIR", Destination: containerHome + "/.config/opencode"}, {Key: "OPENCODE_DATA_DIR", Destination: containerHome + "/.local/share/opencode"}}, Description: "Runs OpenCode with its explicit XDG config and data directories mounted."}, nil
+	case OriClaude:
+		return oriAdapter(OriClaude, Claude, model), nil
+	case OriCodex:
+		return oriAdapter(OriCodex, Codex, model), nil
+	case OriOpenCode:
+		return oriAdapter(OriOpenCode, OpenCode, model), nil
 	default:
 		return Adapter{}, fmt.Errorf("unsupported agent %q (supported: %s)", name, strings.Join(Supported(), ", "))
 	}
 }
 
+func oriAdapter(name, child, model string) Adapter {
+	command := []string{"ori", child}
+	if model != "" {
+		command = append(command, "--model", model)
+	}
+	environment := homeEnvironment()
+	state := []StateLocation{{Key: "ORI_STATE_DIR", Destination: containerHome + "/.ori"}}
+	switch child {
+	case Claude:
+		state = append(state, StateLocation{Key: "CLAUDE_STATE_DIR", Destination: containerHome + "/.claude"})
+	case Codex:
+		environment["CODEX_HOME"] = containerHome + "/.codex"
+		state = append(state, StateLocation{Key: "CODEX_STATE_DIR", Destination: containerHome + "/.codex"})
+		command = append(command, "--dangerously-bypass-approvals-and-sandbox")
+	case OpenCode:
+		environment["XDG_CONFIG_HOME"] = containerHome + "/.config"
+		environment["XDG_DATA_HOME"] = containerHome + "/.local/share"
+		state = append(state, StateLocation{Key: "OPENCODE_CONFIG_DIR", Destination: containerHome + "/.config/opencode"}, StateLocation{Key: "OPENCODE_DATA_DIR", Destination: containerHome + "/.local/share/opencode"})
+	}
+	return Adapter{Name: name, Command: command, Environment: environment, State: state, Model: model, Description: "Runs " + child + " through Ori with only Ori and the selected harness state mounted."}
+}
+
+func validateModel(name, model string) error {
+	if model == "" {
+		return nil
+	}
+	if !strings.HasPrefix(name, "ori/") {
+		return fmt.Errorf("--model is supported only for Ori harnesses")
+	}
+	if strings.HasPrefix(model, "-") {
+		return fmt.Errorf("Ori model must not begin with an option prefix")
+	}
+	for _, character := range model {
+		if unicode.IsSpace(character) || unicode.IsControl(character) {
+			return fmt.Errorf("Ori model must be one non-empty command argument without whitespace or control characters")
+		}
+	}
+	return nil
+}
+
 func homeEnvironment() map[string]string { return map[string]string{"HOME": containerHome} }
 
 // Supported returns names in stable CLI/display order.
-func Supported() []string { return []string{Claude, Codex, OpenCode} }
+func Supported() []string { return []string{Claude, Codex, OpenCode, OriClaude, OriCodex, OriOpenCode} }
 
 // ResolveState creates and validates only the selected adapter's required
 // direct host paths. Environment overrides intentionally exist per agent, not
@@ -90,7 +150,7 @@ func ResolveState(adapter Adapter) ([]container.StateMount, error) {
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize XDG data directory: %w", err)
 	}
-	defaults := map[string]string{"CLAUDE_STATE_DIR": filepath.Join(home, ".claude"), "CODEX_STATE_DIR": filepath.Join(home, ".codex"), "OPENCODE_CONFIG_DIR": filepath.Join(xdgConfig, "opencode"), "OPENCODE_DATA_DIR": filepath.Join(xdgData, "opencode")}
+	defaults := map[string]string{"CLAUDE_STATE_DIR": filepath.Join(home, ".claude"), "CODEX_STATE_DIR": filepath.Join(home, ".codex"), "OPENCODE_CONFIG_DIR": filepath.Join(xdgConfig, "opencode"), "OPENCODE_DATA_DIR": filepath.Join(xdgData, "opencode"), "ORI_STATE_DIR": filepath.Join(home, ".ori")}
 	for key, path := range defaults {
 		canonical, err := canonicalExistingPath(path)
 		if err != nil {

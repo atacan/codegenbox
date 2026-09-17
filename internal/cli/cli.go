@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/codegenbox/codegenbox/internal/agent"
 	"github.com/codegenbox/codegenbox/internal/config"
@@ -163,7 +164,7 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		if err != nil {
 			return err
 		}
-		adapter, err := agent.Lookup(start.Agent)
+		adapter, err := agent.Resolve(start.Agent, start.Model)
 		if err != nil {
 			return err
 		}
@@ -194,40 +195,67 @@ func parseArguments(arguments []string) (string, error) {
 
 type startArguments struct {
 	Agent          string
+	Model          string
 	PostExitAction session.PostExitAction
 }
 
 func parseStartArguments(arguments []string) (startArguments, error) {
 	var agentName string
 	var options []string
+	var startIndex int
 	switch {
 	case len(arguments) >= 1 && arguments[0] == "run":
 		if len(arguments) < 2 {
 			return startArguments{}, usageError()
 		}
-		agentName, options = arguments[1], arguments[2:]
+		startIndex = 1
 	case len(arguments) >= 1:
-		agentName, options = arguments[0], arguments[1:]
+		startIndex = 0
 	default:
 		return startArguments{}, usageError()
 	}
+	agentName = arguments[startIndex]
+	optionIndex := startIndex + 1
+	if strings.EqualFold(strings.TrimSpace(agentName), "ori") {
+		if len(arguments) <= optionIndex {
+			return startArguments{}, usageError()
+		}
+		agentName = "ori/" + arguments[optionIndex]
+		optionIndex++
+	}
+	options = arguments[optionIndex:]
 	start := startArguments{Agent: agentName}
-	for _, option := range options {
+	modelSet := false
+	for index := 0; index < len(options); index++ {
+		option := options[index]
 		switch option {
 		case "--open-pr":
 			if start.PostExitAction != session.PostExitActionNone {
 				return startArguments{}, usageError()
 			}
 			start.PostExitAction = session.PostExitActionOpenCompare
+		case "--model":
+			if modelSet || index+1 >= len(options) {
+				return startArguments{}, usageError()
+			}
+			modelSet = true
+			index++
+			start.Model = options[index]
+			if start.Model == "" {
+				return startArguments{}, usageError()
+			}
 		default:
 			return startArguments{}, usageError()
 		}
+	}
+	if _, err := agent.Resolve(start.Agent, start.Model); err != nil {
+		return startArguments{}, err
 	}
 	return start, nil
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: codegenbox <agent> [--open-pr] | codegenbox run <agent> [--open-pr] | codegenbox resume <session-id> | codegenbox continue <session-id> | codegenbox sessions | codegenbox doctor | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode")
+	return fmt.Errorf("usage: codegenbox <agent> [--open-pr] | codegenbox ori <harness> [--model <model-id>] [--open-pr] | codegenbox run <agent> [--open-pr] | codegenbox run ori <harness> [--model <model-id>] [--open-pr] | codegenbox resume <session-id> | codegenbox continue <session-id> | codegenbox sessions | codegenbox doctor | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode; Ori harnesses: claude, codex, opencode")
 }
 
 func finishSessionRun(ctx context.Context, output io.Writer, style terminal.Style, result session.Result, runErr error, openCompareAfterPush func(context.Context, session.Metadata) (host.CompareHandoff, error)) error {

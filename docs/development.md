@@ -13,14 +13,17 @@ collisions, and the Docker socket. It never accepts a user mount flag.
 | Claude | `claude` | host `~/.claude` → `/home/agent/.claude` | `HOME=/home/agent` |
 | Codex | `codex --dangerously-bypass-approvals-and-sandbox` | host `~/.codex` → `/home/agent/.codex` | `HOME=/home/agent`, `CODEX_HOME=/home/agent/.codex` |
 | OpenCode | `opencode` | host XDG config/data `opencode` children → matching `/home/agent` XDG children | `HOME`, `XDG_CONFIG_HOME=/home/agent/.config`, `XDG_DATA_HOME=/home/agent/.local/share` |
+| Ori/Claude | `ori claude [--model <id>]` | host `~/.ori` and `~/.claude` → matching `/home/agent` children | `HOME=/home/agent` |
+| Ori/Codex | `ori codex [--model <id>] --dangerously-bypass-approvals-and-sandbox` | host `~/.ori` and `~/.codex` → matching `/home/agent` children | `HOME`, `CODEX_HOME=/home/agent/.codex` |
+| Ori/OpenCode | `ori opencode [--model <id>]` | host `~/.ori` and selected OpenCode XDG children → matching `/home/agent` children | `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` |
 
 The production image replaces the Node proof image. It contains Ubuntu 24.04
 LTS, common interactive/source tools, C/C++ build tooling, Node/npm/pnpm,
 Python/uv, Go, Rust/cargo/rustfmt, `srcmv`, Swift for Linux, and installed
-Claude Code, Codex, and OpenCode. Keep OS, toolchain, and agent versions
-explicit in Docker build inputs. Normal agent startup must not run `npx`,
-install a package, or depend on a package registry; the adapter commands above
-execute installed binaries.
+Claude Code, Codex, OpenCode, and Ori executables. Keep OS, toolchain, and agent
+versions explicit in Docker build inputs. Normal agent startup must not run
+`npx`, install a package, or depend on a package registry; the adapter commands
+above execute installed binaries.
 
 The CLI default is `docker.io/atacandur/codegenbox:0.4.0`.
 `CODEGENBOX_IMAGE` remains the only supported image override for a compatible
@@ -31,10 +34,18 @@ the Phase 3 checkpoint.
 
 For an unusual installation, override only the required direct agent state
 location with `CODEGENBOX_CLAUDE_STATE_DIR`, `CODEGENBOX_CODEX_STATE_DIR`,
-`CODEGENBOX_OPENCODE_CONFIG_DIR`, or `CODEGENBOX_OPENCODE_DATA_DIR`. Overrides
-do not permit host home, generic XDG parents, commas, or known another-agent
-default state. Missing selected directories are created mode 0700; existing
-directories are not chmodded or read by Codegenbox.
+`CODEGENBOX_OPENCODE_CONFIG_DIR`, `CODEGENBOX_OPENCODE_DATA_DIR`, or
+`CODEGENBOX_ORI_STATE_DIR`. Overrides do not permit host home, generic XDG
+parents, commas, or known another-agent default state. Missing selected
+directories are created mode 0700; existing directories are not chmodded or
+read by Codegenbox.
+
+Ori is a composed adapter rather than a generic pass-through. Metadata records
+`ori/claude`, `ori/codex`, or `ori/opencode`, plus an optional model. Resume and
+continue reconstruct that exact command. Only `--model` is accepted from the
+user; the fixed Codex bypass remains appended by the adapter. Ori state and the
+selected child state are both mounted, but state belonging to any other child
+is rejected by the independent container allowlist.
 
 All state mounts are read-write: the CLIs can persist OAuth refresh state,
 configuration, and history. The only ordinary source mount remains the
@@ -138,8 +149,9 @@ options.
 
 `doctor` runs only Git/Docker version and info commands, image inspect, and a
 private storage write probe. It never starts an agent or resolves agent state.
-Image compatibility uses `io.codegenbox.compatibility=1`; unlabelled Phase 3
-0.1 images remain supported, while a present incompatible label is rejected.
+Image compatibility uses `io.codegenbox.compatibility=2`. The label must be
+present and match exactly; v1, unlabelled, and other incompatible images are
+rejected before any agent state is resolved or mounted.
 
 Running metadata records the owner PID plus a unique Docker container name.
 At the next start/resume/continue, a dead/absent PID is recovered only after Docker
@@ -201,6 +213,11 @@ small uncommitted edit, then use the exact ID from `codegenbox sessions` with
 `codegenbox resume`. Confirm the agent discovers the previous history/auth,
 then commit or remove the edit and exit. Inspect `sessions` only; never print,
 copy, or add test tokens/state files to source control.
+
+Repeat for Ori/Claude, Ori/Codex, and Ori/OpenCode after installing Ori on the
+host and running global `ori login` (never `ori login --local`). Confirm each
+container receives Ori state plus only its chosen child state, and that a model
+selected with `--model` remains unchanged on resume and continue.
 
 Run the validation suite with:
 

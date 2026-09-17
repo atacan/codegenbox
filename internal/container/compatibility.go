@@ -11,7 +11,7 @@ import (
 // It prevents a locally retagged arbitrary image from silently receiving agent
 // state mounts and the fixed adapter commands.
 const CompatibilityLabel = "io.codegenbox.compatibility"
-const CompatibilityVersion = "1"
+const CompatibilityVersion = "2"
 
 type Inspector interface {
 	Output(context.Context, string, ...string) (string, error)
@@ -28,11 +28,7 @@ func CheckImageCompatibility(ctx context.Context, inspector Inspector, dockerBin
 	if err != nil {
 		return err
 	}
-	// Phase 3 images predate this label. Keep them usable for the 0.1 CLI line;
-	// once a label is present, however, it must match exactly.
-	if trimmed := strings.TrimSpace(value); trimmed == "" || trimmed == "<no value>" {
-		return nil
-	} else if trimmed != CompatibilityVersion {
+	if trimmed := strings.TrimSpace(value); trimmed != CompatibilityVersion {
 		return fmt.Errorf("image %q is not compatible with this Codegenbox CLI (want %s=%s)", image, CompatibilityLabel, CompatibilityVersion)
 	}
 	return nil

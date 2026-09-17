@@ -49,6 +49,48 @@ func TestBuildRunInvocationContainsOnlySelectedAdapterState(t *testing.T) {
 	}
 }
 
+func TestBuildRunInvocationAllowsOnlyComposedOriProfileState(t *testing.T) {
+	stubHostIdentity(t, hostIdentity{uid: 501, gid: 20}, nil)
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	workspace := filepath.Join(base, "workspace")
+	oriState := filepath.Join(home, ".ori")
+	claudeState := filepath.Join(home, ".claude")
+	codexState := filepath.Join(home, ".codex")
+	for _, path := range []string{workspace, oriState, claudeState, codexState, filepath.Join(home, ".config"), filepath.Join(home, ".local", "share")} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+
+	mounts := []StateMount{
+		{Agent: "ori/claude", Source: oriState, Destination: "/home/agent/.ori"},
+		{Agent: "ori/claude", Source: claudeState, Destination: "/home/agent/.claude"},
+	}
+	invocation, err := BuildRunInvocation("docker", "image", workspace, []string{"ori", "claude", "--model", "anthropic/claude-sonnet-4"}, []string{"HOME=/home/agent"}, "ori/claude", nil, mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotMounts := valuesAfter(invocation.Args, "--mount")
+	if len(gotMounts) != 3 || !strings.Contains(gotMounts[1], "dst=/home/agent/.ori") || !strings.Contains(gotMounts[2], "dst=/home/agent/.claude") {
+		t.Fatalf("composed mounts = %#v", gotMounts)
+	}
+
+	crossChild := []StateMount{
+		{Agent: "ori/claude", Source: oriState, Destination: "/home/agent/.ori"},
+		{Agent: "ori/claude", Source: codexState, Destination: "/home/agent/.claude"},
+	}
+	if _, err := BuildRunInvocation("docker", "image", workspace, []string{"ori", "claude"}, nil, "ori/claude", nil, crossChild); err == nil {
+		t.Fatal("Ori/Claude accepted Codex state as its child state")
+	}
+	if _, err := BuildRunInvocation("docker", "image", workspace, []string{"ori", "claude"}, nil, "ori/claude", nil, []StateMount{{Agent: "ori/claude", Source: oriState, Destination: "/home/agent/.codex"}}); err == nil {
+		t.Fatal("Ori/Claude accepted an unlisted destination")
+	}
+}
+
 func TestBuildRunInvocationAddsOnlyValidatedResourceLimitFlags(t *testing.T) {
 	stubHostIdentity(t, hostIdentity{uid: 501, gid: 20}, nil)
 	workspace := filepath.Join(t.TempDir(), "workspace")
@@ -262,6 +304,16 @@ func TestBuildRunInvocationCanonicalizesAliasedSources(t *testing.T) {
 	}
 	if _, err := BuildRunInvocation("docker", "image", workspace, []string{"claude"}, nil, "claude", nil, []StateMount{{Agent: "claude", Source: codexAlias, Destination: "/home/agent/.claude"}}); err == nil {
 		t.Fatal("aliased cross-agent state accepted")
+	}
+	oriAlias := filepath.Join(base, "ori-alias")
+	if err := os.MkdirAll(filepath.Join(home, ".ori"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".ori"), oriAlias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildRunInvocation("docker", "image", workspace, []string{"claude"}, nil, "claude", nil, []StateMount{{Agent: "claude", Source: oriAlias, Destination: "/home/agent/.claude"}}); err == nil {
+		t.Fatal("direct Claude adapter accepted Ori state")
 	}
 	state := filepath.Join(base, "state")
 	if err := os.MkdirAll(state, 0o700); err != nil {
