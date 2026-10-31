@@ -42,6 +42,7 @@ To prepare and publish a release, run `scripts/release.sh MAJOR.MINOR.PATCH` fro
 cd /path/to/a/git/repository
 codegenbox claude
 codegenbox codex
+codegenbox codex --base main
 codegenbox codex --open-pr
 codegenbox opencode
 codegenbox ori claude
@@ -55,6 +56,14 @@ codegenbox compare <session-id>
 codegenbox pr <session-id>
 codegenbox doctor
 ```
+
+Use `--base <local-branch>` to start a new session from that local branch's
+committed tip without changing your current checkout or its files. For example,
+`codegenbox codex --base main` starts from local `main` even when your folder is
+on another branch. The option also works with `run` and Ori harnesses and can
+be combined with `--open-pr`. It does not fetch remote updates or accept tags,
+commit IDs, or remote-tracking refs. Without `--base`, sessions start from the
+current `HEAD`. Uncommitted source changes are not copied into the session.
 
 `codegenbox <agent>` and `codegenbox run <agent>` are equivalent. `sessions`
 prints stable ID/agent/state/workspace/branch records without reading or

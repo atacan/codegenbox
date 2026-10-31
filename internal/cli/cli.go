@@ -183,7 +183,7 @@ func Run(ctx context.Context, arguments []string, environment Environment) error
 		if _, err := manager.RecoverOrphans(ctx); err != nil {
 			return fmt.Errorf("recover interrupted sessions: %w", err)
 		}
-		result, runErr := manager.Start(ctx, workingDirectory, adapter, configured.Image, configured.DockerBinary, session.StartOptions{PostExitAction: start.PostExitAction})
+		result, runErr := manager.Start(ctx, workingDirectory, adapter, configured.Image, configured.DockerBinary, session.StartOptions{BaseBranch: start.BaseBranch, PostExitAction: start.PostExitAction})
 		return finishSessionRun(ctx, output, style, result, runErr, openCompareAfterPush)
 	}
 }
@@ -194,6 +194,7 @@ func parseArguments(arguments []string) (string, error) {
 }
 
 type startArguments struct {
+	BaseBranch     string
 	Agent          string
 	Model          string
 	PostExitAction session.PostExitAction
@@ -234,6 +235,15 @@ func parseStartArguments(arguments []string) (startArguments, error) {
 				return startArguments{}, usageError()
 			}
 			start.PostExitAction = session.PostExitActionOpenCompare
+		case "--base":
+			if start.BaseBranch != "" || index+1 >= len(options) {
+				return startArguments{}, usageError()
+			}
+			index++
+			start.BaseBranch = options[index]
+			if start.BaseBranch == "" || strings.HasPrefix(start.BaseBranch, "-") {
+				return startArguments{}, usageError()
+			}
 		case "--model":
 			if modelSet || index+1 >= len(options) {
 				return startArguments{}, usageError()
@@ -255,7 +265,7 @@ func parseStartArguments(arguments []string) (startArguments, error) {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: codegenbox <agent> [--open-pr] | codegenbox ori <harness> [--model <model-id>] [--open-pr] | codegenbox run <agent> [--open-pr] | codegenbox run ori <harness> [--model <model-id>] [--open-pr] | codegenbox resume <session-id> | codegenbox continue <session-id> | codegenbox sessions | codegenbox doctor | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode; Ori harnesses: claude, codex, opencode")
+	return fmt.Errorf("usage: codegenbox <agent> [--base <local-branch>] [--open-pr] | codegenbox ori <harness> [--model <model-id>] [--base <local-branch>] [--open-pr] | codegenbox run <agent> [--base <local-branch>] [--open-pr] | codegenbox run ori <harness> [--model <model-id>] [--base <local-branch>] [--open-pr] | codegenbox resume <session-id> | codegenbox continue <session-id> | codegenbox sessions | codegenbox doctor | codegenbox push <session-id> | codegenbox compare <session-id> | codegenbox pr <session-id> | codegenbox version\nsupported agents: claude, codex, opencode; Ori harnesses: claude, codex, opencode")
 }
 
 func finishSessionRun(ctx context.Context, output io.Writer, style terminal.Style, result session.Result, runErr error, openCompareAfterPush func(context.Context, session.Metadata) (host.CompareHandoff, error)) error {

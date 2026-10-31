@@ -61,6 +61,27 @@ func Discover(ctx context.Context, directory string) (Repository, error) {
 	}, nil
 }
 
+// ResolveBaseBranch captures a specific local branch without changing the checkout.
+func ResolveBaseBranch(ctx context.Context, repository Repository, branch string) (Repository, error) {
+	ref := "refs/heads/" + branch
+	if branch == "" || strings.HasPrefix(branch, "-") {
+		return Repository{}, fmt.Errorf("invalid local base branch %q", branch)
+	}
+	if _, err := run(ctx, repository.Root, "check-ref-format", ref); err != nil {
+		return Repository{}, fmt.Errorf("invalid local base branch %q: %w", branch, err)
+	}
+	commit, err := run(ctx, repository.Root, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
+	if err != nil {
+		return Repository{}, fmt.Errorf("resolve local base branch %q: %w", branch, err)
+	}
+	if err := validateOID(commit); err != nil {
+		return Repository{}, fmt.Errorf("validate base branch commit: %w", err)
+	}
+	repository.BaseBranch = branch
+	repository.BaseCommit = commit
+	return repository, nil
+}
+
 // CreateSessionClone makes an independent clone whose complete Git directory
 // is within workspace. It intentionally does not retain a remote back to the
 // source repository: Docker mounts only this clone, not the source repository.

@@ -44,6 +44,7 @@ type Result struct {
 // durable session metadata. Callers may omit it to preserve the manual-only
 // default behavior.
 type StartOptions struct {
+	BaseBranch     string
 	PostExitAction PostExitAction
 }
 
@@ -75,6 +76,12 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 	repository, err := gitops.Discover(ctx, workingDirectory)
 	if err != nil {
 		return Result{}, err
+	}
+	if startOptions.BaseBranch != "" {
+		repository, err = gitops.ResolveBaseBranch(ctx, repository, startOptions.BaseBranch)
+		if err != nil {
+			return Result{}, err
+		}
 	}
 	dataRoot, err := prepareDataRoot(m.DataRoot, repository.Root)
 	if err != nil {

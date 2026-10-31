@@ -69,3 +69,18 @@ func writeTestFile(t *testing.T, path, contents string) {
 		t.Fatal(err)
 	}
 }
+
+func TestResolveBaseBranchRejectsNonLocalBranches(t *testing.T) {
+	repository := newTestRepository(t)
+	base, err := Discover(context.Background(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, repository, "tag", "only-tag")
+	testGit(t, repository, "update-ref", "refs/remotes/origin/main", base.BaseCommit)
+	for _, branch := range []string{"", "missing", "only-tag", "origin/main", base.BaseCommit, "main~0", "main^{commit}", "../main", "--help", "refs/heads/main"} {
+		if _, err := ResolveBaseBranch(context.Background(), base, branch); err == nil {
+			t.Errorf("accepted non-local branch %q", branch)
+		}
+	}
+}

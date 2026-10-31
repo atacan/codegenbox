@@ -1143,3 +1143,44 @@ func assertGitRefMissing(t *testing.T, directory, ref string) {
 		t.Fatalf("ref %q unexpectedly exists: %s", ref, output)
 	}
 }
+
+func TestStartBaseBranchLeavesSourceCheckoutUnchanged(t *testing.T) {
+	for _, base := range []string{"", "main"} {
+		t.Run("base="+base, func(t *testing.T) {
+			repository := newRepository(t)
+			mainCommit := runGit(t, repository, "rev-parse", "main")
+			runGit(t, repository, "checkout", "-b", "feature")
+			writeFile(t, filepath.Join(repository, "feature.txt"), "feature\n")
+			runGit(t, repository, "add", "feature.txt")
+			runGit(t, repository, "commit", "-m", "feature")
+			featureCommit := runGit(t, repository, "rev-parse", "HEAD")
+			writeFile(t, filepath.Join(repository, "README.md"), "uncommitted\n")
+			sourceStatus := runGit(t, repository, "status", "--porcelain")
+			wantBranch, wantCommit := "feature", featureCommit
+			if base != "" {
+				wantBranch, wantCommit = "main", mainCommit
+			}
+			manager := testManager(filepath.Join(t.TempDir(), "state"), runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+				workspace := invocationWorktree(t, invocation)
+				if got := runGit(t, workspace, "rev-parse", "HEAD"); got != wantCommit {
+					t.Fatalf("session HEAD = %s, want %s", got, wantCommit)
+				}
+				if got := runGit(t, workspace, "status", "--porcelain"); got != "" {
+					t.Fatalf("session is dirty: %s", got)
+				}
+				return nil
+			}))
+			adapter, _ := agent.Lookup("codex")
+			result, err := manager.Start(context.Background(), repository, adapter, "image", "docker", StartOptions{BaseBranch: base})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Metadata.BaseBranch != wantBranch || result.Metadata.BaseCommit != wantCommit {
+				t.Fatalf("incorrect base metadata: %#v", result.Metadata)
+			}
+			if runGit(t, repository, "branch", "--show-current") != "feature" || runGit(t, repository, "rev-parse", "HEAD") != featureCommit || runGit(t, repository, "rev-parse", "main") != mainCommit || runGit(t, repository, "status", "--porcelain") != sourceStatus {
+				t.Fatal("source checkout changed")
+			}
+		})
+	}
+}

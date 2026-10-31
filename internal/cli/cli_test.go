@@ -230,3 +230,27 @@ func TestRequestedPostExitActionPrintsRecoveryURLOnBrowserFailure(t *testing.T) 
 		t.Fatalf("browser failure output=%q err=%v", output.String(), err)
 	}
 }
+
+func TestParseBaseBranch(t *testing.T) {
+	for _, args := range [][]string{
+		{"codex", "--base", "main"},
+		{"run", "claude", "--open-pr", "--base", "main"},
+		{"ori", "codex", "--base", "main", "--model", "openai/gpt-5.2"},
+		{"run", "ori", "opencode", "--base", "main"},
+	} {
+		start, err := parseStartArguments(args)
+		if err != nil || start.BaseBranch != "main" {
+			t.Fatalf("parse %q = %#v, %v", args, start, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"codex", "--base"},
+		{"codex", "--base", ""},
+		{"codex", "--base", "--open-pr"},
+		{"codex", "--base", "main", "--base", "other"},
+	} {
+		if _, err := parseStartArguments(args); err == nil {
+			t.Fatalf("accepted invalid arguments %q", args)
+		}
+	}
+}
