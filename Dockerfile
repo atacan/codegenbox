@@ -33,6 +33,7 @@ ARG SWIFT_VERSION=6.1.2
 # revision with the image's Rust toolchain for both supported architectures.
 ARG SRCMV_VERSION=0.6.2
 ARG SRCMV_REVISION=89138a9e96403d826781b4ed053ad5a72c56ca61
+ARG SRCMV_SOURCE_SHA256=5dcb54a304ac452a5000d13e716069fd391fb25e48bc76cbfabfee5aebcc0509
 
 # These are the vendor-published hashes for the architecture-specific Node and
 # Go archives.  They are arguments so a version bump must also intentionally
@@ -254,6 +255,24 @@ RUN groupadd --gid 10001 agent \
     && rm -rf /home/agent \
     && install -d --owner=agent --group=agent --mode=0755 /workspace /home/agent/.claude /home/agent/.codex /home/agent/.ori /home/agent/.config/opencode /home/agent/.local/share/opencode \
     && find /home/agent -type d -exec chmod 1777 {} +
+
+# Install the complete upstream skill (including its reference files) from the
+# same immutable revision as the binary. Keep it outside mounted agent state:
+# Codex/OpenCode read ~/.agents/skills; Claude reads the machine policy path.
+# Ori delegates discovery to its selected harness. No runtime installer or
+# mutation of host-mounted skills/configuration is needed.
+RUN curl --fail --location --silent --show-error "https://codeload.github.com/atacan/srcmv/tar.gz/${SRCMV_REVISION}" -o /tmp/srcmv-source.tar.gz \
+    && echo "${SRCMV_SOURCE_SHA256}  /tmp/srcmv-source.tar.gz" | sha256sum --check --strict \
+    && install -d --mode=0755 /opt/codegenbox/skills \
+    && tar -xzf /tmp/srcmv-source.tar.gz -C /opt/codegenbox/skills --strip-components=2 "srcmv-${SRCMV_REVISION}/skills/srcmv" \
+    && rm /tmp/srcmv-source.tar.gz \
+    && chmod -R a+rX,go-w /opt/codegenbox/skills \
+    && install -d --mode=0755 /home/agent/.agents/skills /etc/claude-code/.claude/skills \
+    && ln -s /opt/codegenbox/skills/srcmv /home/agent/.agents/skills/srcmv \
+    && ln -s /opt/codegenbox/skills/srcmv /etc/claude-code/.claude/skills/srcmv \
+    && test -s /home/agent/.agents/skills/srcmv/SKILL.md \
+    && test -s /etc/claude-code/.claude/skills/srcmv/SKILL.md \
+    && test -s /opt/codegenbox/skills/srcmv/references/workflow.md
 
 # System toolchains stay immutable under /opt. Package-manager caches, user
 # installs, and generated configuration belong to the mapped runtime user and

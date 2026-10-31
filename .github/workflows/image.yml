@@ -76,6 +76,35 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           push: false
+          load: true
+          tags: codegenbox:skill-smoke
+
+      - name: Verify bundled skills survive agent state mounts for a mapped UID
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_root=$(mktemp -d)
+          chmod 0755 "${state_root}"
+          mkdir -p "${state_root}"/{claude,codex,ori,opencode-config,opencode-data}
+          chmod 0777 "${state_root}"/*
+          docker run --rm --user 12345:12345 \
+            --mount "type=bind,src=${state_root}/claude,dst=/home/agent/.claude" \
+            --mount "type=bind,src=${state_root}/codex,dst=/home/agent/.codex" \
+            --mount "type=bind,src=${state_root}/ori,dst=/home/agent/.ori" \
+            --mount "type=bind,src=${state_root}/opencode-config,dst=/home/agent/.config/opencode" \
+            --mount "type=bind,src=${state_root}/opencode-data,dst=/home/agent/.local/share/opencode" \
+            codegenbox:skill-smoke bash -euc '
+              for skill in /home/agent/.agents/skills/srcmv /etc/claude-code/.claude/skills/srcmv; do
+                test -r "${skill}/SKILL.md"
+                test -r "${skill}/agents/openai.yaml"
+                for reference in cli-protocol recovery request-construction safety-and-exactness semantic-selection workflow; do
+                  test -r "${skill}/references/${reference}.md"
+                done
+                grep -qx "name: srcmv" "${skill}/SKILL.md"
+              done
+              srcmv --version
+            '
+          test -z "$(find "${state_root}" -type f -print -quit)"
 
   publish:
     name: Publish immutable Docker Hub manifest

@@ -181,6 +181,11 @@ startup:
 | Ori + Codex | `ori codex [--model <model-id>] --dangerously-bypass-approvals-and-sandbox` |
 | Ori + OpenCode | `ori opencode [--model <model-id>]` |
 
+The image bundles the `srcmv` CLI and its complete upstream skill globally for
+Claude Code, Codex, and OpenCode, including their Ori harnesses. The skill is
+pinned to the CLI's source revision and remains available alongside mounted
+agent state; no manual skill installation is required inside the container.
+
 Codex's bypass flag applies only inside Codegenbox's existing container
 boundary; it does not add host mounts or privileges. The published image index
 contains `linux/arm64` and `linux/amd64` variants, allowing Apple Silicon to

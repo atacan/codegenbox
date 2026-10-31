@@ -25,6 +25,16 @@ versions explicit in Docker build inputs. Normal agent startup must not run
 `npx`, install a package, or depend on a package registry; the adapter commands
 above execute installed binaries.
 
+The image also bundles `skills/srcmv` from `SRCMV_REVISION`, matching the
+installed binary. `SRCMV_SOURCE_SHA256` verifies the source archive. The full
+skill tree lives at `/opt/codegenbox/skills/srcmv`; global discovery links are
+`/home/agent/.agents/skills/srcmv` for Codex and OpenCode and
+`/etc/claude-code/.claude/skills/srcmv` for Claude Code. Ori uses the selected
+harness's discovery. These paths remain visible when host agent state is
+mounted, require no runtime `npx skills add`, and do not modify host state.
+The native image CI jobs check the skill and references as a mapped UID with
+all supported agent state directories mounted over empty test directories.
+
 The CLI default is `docker.io/atacandur/codegenbox:0.6.0`.
 `CODEGENBOX_IMAGE` remains the only supported image override for a compatible
 local, private, or test image; it must not alter the fixed command or mount
