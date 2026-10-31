@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec /usr/local/bin/codegenbox-codex "${CODEGENBOX_CODEX_BINARY:-/usr/local/bin/codex}" "$@"

@@ -295,7 +295,10 @@ ENV CARGO_HOME=/home/agent/.cargo \
     PNPM_HOME=/home/agent/.local/share/pnpm \
     PATH=/home/agent/.local/bin:/home/agent/.local/share/pnpm:/home/agent/.cargo/bin:/home/agent/go/bin:/opt/swift/usr/bin:/opt/go/bin:/opt/rust/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
+COPY --chmod=0755 images/codegenbox-codex /usr/local/bin/codegenbox-codex
+COPY --chmod=0755 images/codex /opt/codegenbox/bin/codex
 COPY --chmod=0755 images/codegenbox-session /usr/local/bin/codegenbox-session
+ENV PATH=/opt/codegenbox/bin:${PATH}
 
 USER agent
 WORKDIR /workspace

@@ -1,5 +1,5 @@
 # This image is fully assembled from vendor artifacts and never needs source
-# files from the build context except the session launcher. Keeping the context
+# files from the build context except the session and Codex wrappers. Keeping the context
 # limited to these explicit inputs avoids
 # accidentally sending repository history, agent state, or credentials to the
 # Docker daemon (including a remote builder).
@@ -8,3 +8,5 @@
 !.dockerignore
 !images/
 !images/codegenbox-session
+!images/codegenbox-codex
+!images/codex

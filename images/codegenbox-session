@@ -14,6 +14,8 @@ for argument in "${@:2}"; do
 done
 
 binary=$(command -v codex) || exit 127
+wrapper=()
+hook_wrapper="$(dirname "$0")/codegenbox-codex"
 # The mounted Codex state may describe a daemon installed on another OS, and
 # background processes must not outlive the agent lifecycle in this container.
 arguments=(--no-daemon "${@:2}")
@@ -59,12 +61,14 @@ while true; do
                     continue
                 fi
                 binary="$candidate/bin/codex"
-                export PATH="$candidate/bin:$PATH"
-                command=("$binary" resume "${arguments[@]}")
+                export CODEGENBOX_CODEX_BINARY="$binary"
+                export PATH="/opt/codegenbox/bin:$candidate/bin:$PATH"
+                wrapper=(python3 "$hook_wrapper")
+                command=("${wrapper[@]}" "$binary" resume "${arguments[@]}")
                 break
                 ;;
             r|R)
-                command=("$binary" resume "${arguments[@]}")
+                command=("${wrapper[@]}" "$binary" resume "${arguments[@]}")
                 break
                 ;;
             *) printf 'Choose Enter, u, or r.\n' ;;

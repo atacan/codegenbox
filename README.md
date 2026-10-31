@@ -253,6 +253,21 @@ that direct state directory; Codegenbox rejects host home, generic config/state
 parents, known cross-agent defaults, commas, and mount collisions. It has no
 user-controlled arbitrary mount flags.
 
+Codex keeps sharing authentication and history, but the image's Codex wrapper
+disables hooks declared in the mounted global `hooks.json` and `config.toml`
+(including a selected user profile) for container invocations. It passes
+per-hook `hooks.state` overrides to Codex; it never rewrites the host files or
+installs host-only hook programs such as DCG. Repository hooks and plugin hooks
+retain Codex's normal discovery and trust behavior. This applies to direct
+Codex, Ori/Codex, and Codex started from a container shell, including the
+session menu's updated binary. Calling `/usr/local/bin/codex` directly bypasses
+the wrapper. Existing images need rebuilding to gain this behavior.
+
+Codex merges hook sources, so an empty project hook file cannot replace global
+hooks. See [Codex hooks](https://learn.chatgpt.com/docs/hooks). The wrapper uses
+Codex's per-hook enablement keys rather than disabling the hooks feature,
+preserving repository hooks.
+
 The default Codegenbox storage root is `~/.local/share/codegenbox` (or
 `$XDG_DATA_HOME/codegenbox`); set `CODEGENBOX_DATA_DIR` to override it. This
 location and all state paths must be shared with Docker/Colima. Standard Colima

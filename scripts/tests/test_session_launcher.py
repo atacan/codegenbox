@@ -92,6 +92,9 @@ class LauncherTests(unittest.TestCase):
         return [json.loads(line) for line in (self.root / "calls").read_text().splitlines()]
 
     def test_update_and_resume_preserves_workspace_and_arguments(self):
+        state = self.root / ".codex"
+        state.mkdir()
+        (state / "hooks.json").write_text('{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"/host/dcg"}]}]}}')
         self.start()
         self.expect("[r] Resume:")
         os.write(self.master, b"u\n")
@@ -102,7 +105,8 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(first["args"], ["--no-daemon", "--dangerously-bypass-approvals-and-sandbox"])
         self.assertNotEqual(first["binary"], resumed["binary"])
         self.assertIn("/.local/share/codegenbox/codex.", resumed["binary"])
-        self.assertEqual(resumed["args"], ["resume", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"])
+        self.assertEqual(resumed["args"], ["resume", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox",
+                         "-c", f'hooks.state={{"{state.resolve()}/hooks.json:pre_tool_use:0:0"={{enabled=false}}}}'])
         self.assertEqual(first["cwd"], resumed["cwd"])
         self.assertEqual((self.root / "workspace.txt").read_text(), "preserved work")
 
