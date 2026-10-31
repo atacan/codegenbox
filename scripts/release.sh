@@ -107,7 +107,7 @@ if [ "$local_image" = true ]; then
     # A container builder supports registry pushes with attestations even when
     # the default Docker driver cannot. Reuse its cache without switching the
     # user's selected builder.
-    image_builder=${CODEGENBOX_RELEASE_BUILDER:-codegenbox-release}
+    image_builder=${CODEGENBOX_RELEASE_BUILDER:-codegenbox-publish}
     if ! docker buildx inspect "$image_builder" >/dev/null 2>&1; then
         docker buildx create --name "$image_builder" --driver docker-container
     fi

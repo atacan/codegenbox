@@ -26,7 +26,7 @@ elif args[:2] == ["buildx", "version"]:
 elif args[:2] == ["buildx", "inspect"]:
     sys.exit(0 if mode == "reuse-builder" else 1)
 elif args[:2] == ["buildx", "create"]:
-    print("codegenbox-release")
+    print("codegenbox-publish")
 elif args[:2] == ["buildx", "build"]:
     if mode == "build-failure":
         sys.exit(1)
@@ -143,7 +143,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(any(c[:2] == ["buildx", "create"] for c in self.calls()))
         build = next(c for c in self.calls() if c[:2] == ["buildx", "build"])
-        self.assertEqual(build[build.index("--builder") + 1], "codegenbox-release")
+        self.assertEqual(build[build.index("--builder") + 1], "codegenbox-publish")
         self.assertFalse(any("--use" in c for c in self.calls()))
 
     def test_image_failures_do_not_create_release_or_change_source(self):

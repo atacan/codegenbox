@@ -320,10 +320,13 @@ build or verification creates no release tag. A push followed by a later
 failure may leave the immutable image in the registry for manual inspection;
 the script will not overwrite it on retry.
 
-The script reuses a `docker-container` builder named `codegenbox-release` for
+The script reuses a `docker-container` builder named `codegenbox-publish` for
 layer caching without changing your selected builder. Set
 `CODEGENBOX_RELEASE_BUILDER` to reuse another compatible builder. Local image
 publishing requires Docker Buildx, `jq`, and Docker Hub push credentials.
+Allow enough VM memory for SBOM generation as well as compilation: a 2 GB
+Colima VM exhausted memory during scanning, while 6 GB completed it. Adjust
+Colima with `colima stop` followed by `colima start --memory 6` when needed.
 `python3 -m unittest discover -s scripts/tests -v` tests release sequencing
 against local Git remotes and a Docker stub without publishing artifacts.
 
