@@ -14,7 +14,9 @@ for argument in "${@:2}"; do
 done
 
 binary=$(command -v codex) || exit 127
-arguments=("${@:2}")
+# The mounted Codex state may describe a daemon installed on another OS, and
+# background processes must not outlive the agent lifecycle in this container.
+arguments=(--no-daemon "${@:2}")
 command=("$binary" "${arguments[@]}")
 child_pid=
 stop_child() {
@@ -51,7 +53,8 @@ while true; do
                 fi
                 candidate=$(mktemp -d "$update_root/codex.XXXXXX") || continue
                 if ! npm install --global --no-audit --no-fund --prefix "$candidate" @openai/codex@latest \
-                    || ! "$candidate/bin/codex" --version; then
+                    || ! "$candidate/bin/codex" --version \
+                    || ! "$candidate/bin/codex" resume --no-daemon --help >/dev/null; then
                     printf 'Codex update failed. Your current Codex and workspace are unchanged; retry or resume.\n' >&2
                     continue
                 fi

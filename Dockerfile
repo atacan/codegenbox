@@ -248,7 +248,11 @@ RUN echo "Codex refresh: ${CODEX_REFRESH}" \
     && command -v codex \
     && install -d /usr/local/share/codegenbox \
     && node -p 'require("/usr/local/lib/node_modules/@openai/codex/package.json").version' > /usr/local/share/codegenbox/codex-version \
-    && if [ "${TARGETARCH}" = "${BUILDARCH}" ]; then codex --version; fi \
+    && if [ "${TARGETARCH}" = "${BUILDARCH}" ]; then \
+        codex --version \
+        && codex --no-daemon --help >/dev/null \
+        && codex resume --no-daemon --help >/dev/null; \
+    fi \
     && npm cache clean --force
 
 # The CLI mounts only per-agent state below this synthetic home. Remove caches

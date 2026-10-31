@@ -125,7 +125,10 @@ The image entrypoint `images/codegenbox-session` passes through other commands
 with `exec`; the host CLI, fixed agent commands, and compatibility v2 contract
 remain unchanged. Direct interactive Codex runs as a child with inherited
 terminal input. After it exits, the launcher offers finish, resume, or update
-and resume. Resume opens the `codex resume` picker, preserving the original adapter
+and resume. It adds `--no-daemon` to initial and resumed invocations: mounted
+Codex state can reference an unavailable host daemon, and a background daemon
+would escape the launcher's foreground process lifecycle.
+Resume opens the `codex resume` picker, preserving the original adapter
 arguments. It deliberately avoids `--last`: different Codegenbox containers
 share the saved cwd `/workspace`, so automatic selection could reopen another
 concurrent session's conversation. The user selects the saved conversation. Signals are forwarded to the child,
@@ -142,6 +145,10 @@ No automatic startup update runs. Ori harnesses remain passthrough commands.
 The PTY tests in `scripts/tests/test_session_launcher.py` cover update/resume,
 workspace and argument preservation, failed updates, exit status, EOF, signal
 forwarding, and passthrough without npm or model API access.
+The native image CI jobs also run `test_codex_container.py` against the real
+Codex TUI with a broken host-daemon symlink, synthetic authentication, and a
+localhost-only API URL. Set `CODEGENBOX_TEST_IMAGE=<local image>` to run it
+locally. It starts no model turn and mounts no real credentials.
 
 ## Session lifecycle, resume, and continue
 

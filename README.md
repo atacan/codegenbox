@@ -210,6 +210,8 @@ container's session menu:
 - **Enter — Finish session:** end the container and let Codegenbox import work.
 
 Updating/resuming keeps the same workspace, state mounts, and permissions.
+The launcher uses `--no-daemon` for startup and resume, keeping Codex in the
+container's foreground lifecycle instead of using a host-state daemon.
 A failed update leaves the working Codex available so you can retry or resume.
 The update is container-local and disappears when that container ends; it does
 not change the published image or the host Codex installation. There is no

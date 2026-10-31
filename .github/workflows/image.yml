@@ -108,6 +108,11 @@ jobs:
             '
           test -z "$(find "${state_root}" -type f -print -quit)"
 
+      - name: Verify real Codex TUI starts without a host daemon
+        env:
+          CODEGENBOX_TEST_IMAGE: codegenbox:skill-smoke
+        run: python3 -m unittest discover -s scripts/tests -p test_codex_container.py -v
+
   publish:
     name: Publish immutable Docker Hub manifest
     needs: validate

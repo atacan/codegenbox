@@ -17,6 +17,8 @@ from pathlib import Path
 if "--version" in sys.argv:
     print("codex-cli test")
     sys.exit(0)
+if "--help" in sys.argv:
+    sys.exit(1 if os.environ.get("NPM_BAD_CLI") else 0)
 with open(os.environ["CALL_LOG"], "a") as f:
     f.write(json.dumps({"binary": sys.argv[0], "args": sys.argv[1:], "cwd": os.getcwd()}) + "\\n")
 Path("workspace.txt").write_text("preserved work")
@@ -97,9 +99,10 @@ class LauncherTests(unittest.TestCase):
         os.write(self.master, b"\n")
         self.assertEqual(self.process.wait(timeout=5), 0)
         first, resumed = self.calls()
+        self.assertEqual(first["args"], ["--no-daemon", "--dangerously-bypass-approvals-and-sandbox"])
         self.assertNotEqual(first["binary"], resumed["binary"])
         self.assertIn("/.local/share/codegenbox/codex.", resumed["binary"])
-        self.assertEqual(resumed["args"], ["resume", "--dangerously-bypass-approvals-and-sandbox"])
+        self.assertEqual(resumed["args"], ["resume", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"])
         self.assertEqual(first["cwd"], resumed["cwd"])
         self.assertEqual((self.root / "workspace.txt").read_text(), "preserved work")
 
@@ -115,12 +118,27 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.process.wait(timeout=5), 0)
         first, resumed = self.calls()
         self.assertEqual(first["binary"], resumed["binary"])
+        self.assertIn("--no-daemon", resumed["args"])
 
     def test_finish_preserves_codex_failure_status(self):
         self.start(CODEX_STATUS="7")
         self.expect("[r] Resume:")
         os.write(self.master, b"\n")
         self.assertEqual(self.process.wait(timeout=5), 7)
+
+    def test_update_without_foreground_mode_is_rejected(self):
+        self.start(NPM_BAD_CLI="1")
+        self.expect("[r] Resume:")
+        os.write(self.master, b"u\n")
+        self.expect("Codex update failed")
+        self.expect("[r] Resume:")
+        os.write(self.master, b"r\n")
+        self.expect("[r] Resume:")
+        os.write(self.master, b"\n")
+        self.assertEqual(self.process.wait(timeout=5), 0)
+        first, resumed = self.calls()
+        self.assertEqual(first["binary"], resumed["binary"])
+        self.assertIn("--no-daemon", resumed["args"])
 
     def test_stdin_eof_finishes_session(self):
         self.start()
