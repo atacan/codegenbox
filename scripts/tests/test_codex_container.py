@@ -48,6 +48,21 @@ exec /usr/local/bin/codegenbox-session codex --no-alt-screen --dangerously-bypas
                     self.assertNotIn(b"daemon executable not found", output)
                     if any(marker in output for marker in [b"Sign in", b"sign in", b"Welcome to Codex", b"OpenAI Codex", b"model:"]):
                         self.assertIsNone(process.poll())
+                        # Check the real native process, not only the wrapper
+                        # or --version output. This catches daemon-mode regressions
+                        # even when an authentication mode happens to start.
+                        check = '''from pathlib import Path
+foreground = False
+for process in Path("/proc").iterdir():
+    if not process.name.isdigit(): continue
+    try: args = (process / "cmdline").read_bytes().split(b"\\0")
+    except OSError: continue
+    if args and args[0].endswith(b"/codex") and b"--no-daemon" in args:
+        foreground = True
+assert foreground, "Native Codex was not launched with --no-daemon"
+'''
+                        subprocess.run(["docker", "exec", name, "python3", "-c", check], check=True,
+                                       capture_output=True, text=True, timeout=10)
                         return
                 if process.poll() is not None:
                     break
