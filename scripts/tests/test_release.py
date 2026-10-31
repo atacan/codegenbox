@@ -133,6 +133,9 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(load[load.index("--platform") + 1], "linux/arm64")
         self.assertNotIn("--push", load)
         self.assertIn("--provenance=false", load)
+        refresh = build[build.index("--build-arg") + 1]
+        self.assertTrue(refresh.startswith("CODEX_REFRESH=0.6.4-"))
+        self.assertEqual(load[load.index("--build-arg") + 1], refresh)
         self.assertEqual(build[build.index("--tag") + 1], "docker.io/atacandur/codegenbox:0.6.4")
         records = self.git("show", "v0.6.4:release/image-digests.txt")
         self.assertIn("0.6.4 " + DIGEST, records)

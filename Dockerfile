@@ -44,9 +44,9 @@ ARG GO_SHA256_AMD64=bbca37cc395c974ffa4893ee35819ad23ebb27426df87af92e93a9ec66ef
 ARG GO_SHA256_ARM64=124ea6033a8bf98aa9fbab53e58d134905262d45a022af3a90b73320f3c3afd5
 
 # Agent CLIs are installed during the image build, never through npx at run
-# time.  They can be refreshed independently with --build-arg.
+# time. Claude/OpenCode/Ori remain versioned; Codex installs latest in a late
+# refreshable layer below, with optional user-requested in-session updates.
 ARG CLAUDE_CODE_VERSION=2.1.261
-ARG CODEX_VERSION=0.153.4
 ARG OPENCODE_VERSION=1.18.29
 ARG ORI_VERSION=0.14.3+6e62568
 ARG ORI_SHA256_AMD64=a5f8ae821626ed93c206c1624e7c2c6c97f227a800ba6cb939b849c01948212b
@@ -170,13 +170,12 @@ RUN case "${TARGETARCH}" in \
 
 # Pin npm and pnpm before installing the agent packages.  npm runs the
 # OpenCode package's required postinstall hook, selecting the matching native
-# opencode binary while leaving all three native launchers directly on PATH.
+# opencode binary while leaving their native launchers directly on PATH.
 RUN npm install --global --no-audit --no-fund "npm@${NPM_VERSION}" "pnpm@${PNPM_VERSION}" \
     && npm --version | grep --fixed-strings --quiet "${NPM_VERSION}" \
     && pnpm --version | grep --fixed-strings --quiet "${PNPM_VERSION}" \
-    && npm install --global --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" "opencode-ai@${OPENCODE_VERSION}" \
+    && npm install --global --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}" \
     && command -v claude \
-    && command -v codex \
     && command -v opencode \
     && npm cache clean --force
 
@@ -200,7 +199,6 @@ RUN case "${TARGETARCH}" in \
 # target binaries, as it is an emulator rather than the release runtime. CI
 # must exercise each target on a matching native runner before release.
 RUN command -v claude \
-    && command -v codex \
     && command -v opencode \
     && command -v ori \
     && command -v node \
@@ -214,7 +212,6 @@ RUN command -v claude \
     && command -v swiftc \
     && if [ "${TARGETARCH}" = "${BUILDARCH}" ]; then \
         claude --version \
-        && codex --version \
         && opencode --version \
         && ORI_NO_UPDATE_CHECK=1 ORI_TELEMETRY=0 ori --version \
         && node --input-type=module --eval 'if (40 + 2 !== 42) process.exit(1)' \
@@ -242,6 +239,17 @@ RUN command -v claude \
     else \
         echo "cross-build (${BUILDARCH} -> ${TARGETARCH}): executable smoke deferred to native CI"; \
     fi
+
+# Refresh only this late layer for each release; keep heavy toolchains cached.
+# The release script and CI supply a fresh token and reuse it for local export.
+ARG CODEX_REFRESH=manual
+RUN echo "Codex refresh: ${CODEX_REFRESH}" \
+    && npm install --global --no-audit --no-fund @openai/codex@latest \
+    && command -v codex \
+    && install -d /usr/local/share/codegenbox \
+    && node -p 'require("/usr/local/lib/node_modules/@openai/codex/package.json").version' > /usr/local/share/codegenbox/codex-version \
+    && if [ "${TARGETARCH}" = "${BUILDARCH}" ]; then codex --version; fi \
+    && npm cache clean --force
 
 # The CLI mounts only per-agent state below this synthetic home. Remove caches
 # created by build-time smoke tests before constructing it: Codegenbox runs the
@@ -283,7 +291,10 @@ ENV CARGO_HOME=/home/agent/.cargo \
     PNPM_HOME=/home/agent/.local/share/pnpm \
     PATH=/home/agent/.local/bin:/home/agent/.local/share/pnpm:/home/agent/.cargo/bin:/home/agent/go/bin:/opt/swift/usr/bin:/opt/go/bin:/opt/rust/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
+COPY --chmod=0755 images/codegenbox-session /usr/local/bin/codegenbox-session
+
 USER agent
 WORKDIR /workspace
 
+ENTRYPOINT ["/usr/local/bin/codegenbox-session"]
 CMD ["bash"]

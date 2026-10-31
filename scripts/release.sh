@@ -109,7 +109,9 @@ if [ "$local_image" = true ]; then
         docker buildx create --name "$image_builder" --driver docker-container
     fi
     echo "Building and publishing $image locally for $image_platforms"
+    codex_refresh="$release_version-$(date -u +%Y%m%dT%H%M%SZ)"
     docker buildx build --builder "$image_builder" --platform "$image_platforms" \
+        --build-arg "CODEX_REFRESH=$codex_refresh" \
         --provenance=mode=max --sbom=true --push --tag "$image" \
         --metadata-file "$image_check_dir/metadata.json" .
     docker buildx imagetools inspect "$image" >"$image_check_dir/published"
@@ -136,6 +138,7 @@ if [ "$local_image" = true ]; then
             # local daemon. Classic image stores cannot load a multi-platform
             # index or attestations, so keep those on the registry export.
             docker buildx build --builder "$image_builder" --platform "$native_platform" \
+                --build-arg "CODEX_REFRESH=$codex_refresh" \
                 --provenance=false --sbom=false --load --tag "$image" .
             native_arch=${native_platform#linux/}
             native_digest=$(jq -er --arg arch "$native_arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' "$image_check_dir/manifest.json")

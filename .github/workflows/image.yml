@@ -18,6 +18,7 @@ on:
       - Dockerfile
       - .dockerignore
       - .github/workflows/image.yml
+      - images/codegenbox-session
   push:
     tags:
       - "v*"
@@ -75,6 +76,7 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
+          build-args: CODEX_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           push: false
           load: true
           tags: codegenbox:skill-smoke
@@ -196,6 +198,7 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
+          build-args: CODEX_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           push: true
           provenance: mode=max
           sbom: true

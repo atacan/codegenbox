@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Keep interactive Codex sessions alive while the user updates/restarts Codex.
+set -u
+
+if [[ ${1-} != codex ]] || [[ ! -t 0 || ! -t 1 ]]; then
+    exec "$@"
+fi
+for argument in "${@:2}"; do
+    case "$argument" in
+        --help|-h|--version|-V|exec|resume|login|logout|mcp|completion)
+            exec "$@"
+            ;;
+    esac
+done
+
+binary=$(command -v codex) || exit 127
+arguments=("${@:2}")
+command=("$binary" "${arguments[@]}")
+child_pid=
+stop_child() {
+    local signal=$1 status=$2
+    trap '' TERM INT HUP
+    if [[ -n $child_pid ]]; then
+        kill -s "$signal" "$child_pid" 2>/dev/null || true
+        wait "$child_pid" 2>/dev/null || true
+    fi
+    exit "$status"
+}
+trap 'stop_child TERM 143' TERM
+trap 'stop_child INT 130' INT
+trap 'stop_child HUP 129' HUP
+
+printf 'Exit Codex to update and resume, or finish this Codegenbox session.\n'
+while true; do
+    "${command[@]}" <&0 &
+    child_pid=$!
+    wait "$child_pid"
+    status=$?
+    child_pid=
+
+    while true; do
+        printf '\nCodex exited (%s). [Enter] Finish session  [u] Update and resume  [r] Resume: ' "$status"
+        IFS= read -r choice || exit "$status"
+        case "$choice" in
+            '') exit "$status" ;;
+            u|U)
+                update_root="$HOME/.local/share/codegenbox"
+                if ! mkdir -p "$update_root"; then
+                    printf 'Could not create the update directory. Your current Codex is unchanged.\n' >&2
+                    continue
+                fi
+                candidate=$(mktemp -d "$update_root/codex.XXXXXX") || continue
+                if ! npm install --global --no-audit --no-fund --prefix "$candidate" @openai/codex@latest \
+                    || ! "$candidate/bin/codex" --version; then
+                    printf 'Codex update failed. Your current Codex and workspace are unchanged; retry or resume.\n' >&2
+                    continue
+                fi
+                binary="$candidate/bin/codex"
+                export PATH="$candidate/bin:$PATH"
+                command=("$binary" resume "${arguments[@]}")
+                break
+                ;;
+            r|R)
+                command=("$binary" resume "${arguments[@]}")
+                break
+                ;;
+            *) printf 'Choose Enter, u, or r.\n' ;;
+        esac
+    done
+done

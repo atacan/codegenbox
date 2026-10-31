@@ -21,7 +21,8 @@ The production image replaces the Node proof image. It contains Ubuntu 24.04
 LTS, common interactive/source tools, C/C++ build tooling, Node/npm/pnpm,
 Python/uv, Go, Rust/cargo/rustfmt, `srcmv`, Swift for Linux, and installed
 Claude Code, Codex, OpenCode, and Ori executables. Keep OS, toolchain, and agent
-versions explicit in Docker build inputs. Normal agent startup must not run
+versions explicit in Docker build inputs, except Codex, which deliberately
+installs npm `latest` in a late refreshable layer. Normal agent startup must not run
 `npx`, install a package, or depend on a package registry; the adapter commands
 above execute installed binaries.
 
@@ -108,6 +109,39 @@ clone and selected state directories without changing their host ownership or
 permissions. It is not user configuration and must not become an arbitrary
 Docker user flag. Codegenbox rejects zero UID or GID, so do not run it with
 `sudo`.
+
+## Codex image refresh and in-container restarts
+
+`CODEX_VERSION` is no longer pinned. The Dockerfile installs
+`@openai/codex@latest` after the heavy toolchain layers and records the resolved
+package version at `/usr/local/share/codegenbox/codex-version`. Local releases
+supply a unique `CODEX_REFRESH` build argument and reuse the same value for the
+cached local export, preventing a second npm resolution or image mismatch.
+Image CI also supplies a per-run refresh value. For manual image builds, pass
+`--build-arg CODEX_REFRESH="$(date -u +%Y%m%dT%H%M%SZ)"` to refresh Codex even
+when earlier layers are cached. Other tools remain pinned as before.
+
+The image entrypoint `images/codegenbox-session` passes through other commands
+with `exec`; the host CLI, fixed agent commands, and compatibility v2 contract
+remain unchanged. Direct interactive Codex runs as a child with inherited
+terminal input. After it exits, the launcher offers finish, resume, or update
+and resume. Resume opens the `codex resume` picker, preserving the original adapter
+arguments. It deliberately avoids `--last`: different Codegenbox containers
+share the saved cwd `/workspace`, so automatic selection could reopen another
+concurrent session's conversation. The user selects the saved conversation. Signals are forwarded to the child,
+and the launcher waits before returning so host import cannot race Codex.
+EOF and finish return the last Codex exit status. Non-TTY runs bypass the menu.
+
+Updates use a new user-owned npm prefix below
+`$HOME/.local/share/codegenbox`, verify the new executable, and switch only
+after success. A failed install never replaces the working executable. No
+host executable, mounted state path, or source workspace is used for tool
+installation; updated executables disappear with the disposable container.
+No automatic startup update runs. Ori harnesses remain passthrough commands.
+
+The PTY tests in `scripts/tests/test_session_launcher.py` cover update/resume,
+workspace and argument preservation, failed updates, exit status, EOF, signal
+forwarding, and passthrough without npm or model API access.
 
 ## Session lifecycle, resume, and continue
 

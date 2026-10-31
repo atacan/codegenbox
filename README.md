@@ -196,6 +196,26 @@ Claude Code, Codex, and OpenCode, including their Ori harnesses. The skill is
 pinned to the CLI's source revision and remains available alongside mounted
 agent state; no manual skill installation is required inside the container.
 
+Codex is installed from npm's `latest` tag when the image is built. Each
+release refreshes its install layer; the installed version is recorded in
+`/usr/local/share/codegenbox/codex-version`. Existing images retain the version
+installed when they were built.
+
+For a direct interactive `codegenbox codex` session, exit Codex to open the
+container's session menu:
+
+- **u — Update and resume:** install the latest Codex as the container user,
+  then select the saved conversation in Codex's resume picker.
+- **r — Resume:** choose a saved conversation with the current Codex.
+- **Enter — Finish session:** end the container and let Codegenbox import work.
+
+Updating/resuming keeps the same workspace, state mounts, and permissions.
+A failed update leaves the working Codex available so you can retry or resume.
+The update is container-local and disappears when that container ends; it does
+not change the published image or the host Codex installation. There is no
+startup network check. Noninteractive commands, Claude, OpenCode, and Ori
+harnesses retain their existing direct execution behavior.
+
 Codex's bypass flag applies only inside Codegenbox's existing container
 boundary; it does not add host mounts or privileges. The published image index
 contains `linux/arm64` and `linux/amd64` variants, allowing Apple Silicon to
