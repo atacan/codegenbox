@@ -36,6 +36,14 @@ image automatically.
 
 To prepare and publish a release, run `scripts/release.sh MAJOR.MINOR.PATCH` from a clean `main` checkout.
 
+To build and push the image on your own Docker daemon before publishing the
+release, use `scripts/release.sh MAJOR.MINOR.PATCH --local-image`. This defaults
+to the daemon's native architecture (ARM64 on Apple Silicon). Use
+`--platforms linux/amd64,linux/arm64` for both architectures. A native-only
+release image runs only on that architecture. Docker Hub login, Buildx, and
+`jq` are required. The script records the verified image digest in the release
+commit so GitHub reuses it rather than rebuilding the published image.
+
 ## Use
 
 ```sh

@@ -296,6 +296,37 @@ a push, inspect the manifest with:
 docker buildx imagetools inspect <image:tag>
 ```
 
+For releases built on your own Docker daemon, log in with `docker login`, then
+run the release script from a clean `main` checkout:
+
+```sh
+scripts/release.sh MAJOR.MINOR.PATCH --local-image
+# Explicitly build both architectures instead of only the daemon's native one:
+scripts/release.sh MAJOR.MINOR.PATCH --local-image --platforms linux/amd64,linux/arm64
+```
+
+Local publishing defaults to ARM64 on an ARM64 daemon and AMD64 on an AMD64
+daemon. An ARM64-only image will not run on AMD64 machines, even though the CLI
+workflow still publishes binaries for both. The existing invocation without
+`--local-image` continues to let GitHub build the multi-platform image.
+
+The local path builds and pushes the image before changing version files,
+creating a commit, or tagging. It refuses an existing registry tag, verifies
+the registry digest against Buildx metadata and the selected platforms, then
+records that digest in `release/image-digests.txt` inside the release commit.
+GitHub still runs native validation, but skips the slow publishing build when
+the recorded digest matches the image already in Docker Hub. A failed local
+build or verification creates no release tag. A push followed by a later
+failure may leave the immutable image in the registry for manual inspection;
+the script will not overwrite it on retry.
+
+The script reuses a `docker-container` builder named `codegenbox-release` for
+layer caching without changing your selected builder. Set
+`CODEGENBOX_RELEASE_BUILDER` to reuse another compatible builder. Local image
+publishing requires Docker Buildx, `jq`, and Docker Hub push credentials.
+`python3 -m unittest discover -s scripts/tests -v` tests release sequencing
+against local Git remotes and a Docker stub without publishing artifacts.
+
 The publishing workflow requires the `DOCKERHUB_IMAGE` Actions variable (set
 to `atacandur/codegenbox`) plus `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`
 secrets. Pull requests and manual dispatches validate both architectures
@@ -303,8 +334,8 @@ without credentials or a push; manual publishing requires its explicit
 `publish` input. A `v0.1.0` tag publishes only the immutable `0.1.0` tag. The
 workflow skips a version only when the existing registry digest exactly
 matches `release/image-digests.txt`; it refuses every other overwrite. Verify
-the successful authenticated workflow run, pull access, and both manifests
-before announcing a later tag. The CLI publishing workflow then renders the
+the successful authenticated workflow run (or verified local push), pull
+access, and all selected architecture manifests before announcing a later tag. The CLI publishing workflow then renders the
 Homebrew formula from its published checksums and atomically updates
 `atacan/homebrew-tap`. It requires the `HOMEBREW_TAP_GITHUB_TOKEN` Actions
 secret: a fine-grained token restricted to that repository with only Contents

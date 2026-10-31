@@ -37,6 +37,11 @@ jobs:
           go test -race ./...
           go vet ./...
 
+      - name: Test release script
+        run: |
+          sh -n scripts/release.sh
+          python3 -m unittest discover -s scripts/tests -v
+
   build:
     name: Build ${{ matrix.target }}
     needs: test
