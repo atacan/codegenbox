@@ -43,6 +43,8 @@ to the daemon's native architecture (ARM64 on Apple Silicon). Use
 release image runs only on that architecture. Docker Hub login, Buildx, and
 `jq` are required. The script records the verified image digest in the release
 commit so GitHub reuses it rather than rebuilding the published image.
+It also loads the native image from the build cache into your local Docker
+daemon under the release tag, so Codegenbox can use it without downloading it.
 
 ## Use
 

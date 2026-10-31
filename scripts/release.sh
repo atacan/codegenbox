@@ -79,16 +79,13 @@ if [ "$local_image" = true ]; then
     }
     trap cleanup_image_check EXIT
     trap 'exit 1' HUP INT TERM
-    if [ -z "$image_platforms" ]; then
-        daemon_arch=$(docker info --format '{{.Architecture}}')
-        case "$daemon_arch" in
-            arm64 | aarch64) image_platforms=linux/arm64 ;;
-            amd64 | x86_64) image_platforms=linux/amd64 ;;
-            *) echo "unsupported Docker architecture: $daemon_arch" >&2; exit 1 ;;
-        esac
-    else
-        docker info >/dev/null
-    fi
+    daemon_arch=$(docker info --format '{{.Architecture}}')
+    case "$daemon_arch" in
+        arm64 | aarch64) native_platform=linux/arm64 ;;
+        amd64 | x86_64) native_platform=linux/amd64 ;;
+        *) echo "unsupported Docker architecture: $daemon_arch" >&2; exit 1 ;;
+    esac
+    image_platforms=${image_platforms:-$native_platform}
     docker buildx version >/dev/null
     command -v jq >/dev/null
     if docker buildx imagetools inspect "$image" >"$image_check_dir/existing" 2>"$image_check_dir/error"; then
@@ -133,6 +130,27 @@ if [ "$local_image" = true ]; then
         echo "published platforms do not match $image_platforms; no release tag was created" >&2
         exit 1
     fi
+    case ",$image_platforms," in
+        *",$native_platform,"*)
+            # Export the native platform from the same cached build into the
+            # local daemon. Classic image stores cannot load a multi-platform
+            # index or attestations, so keep those on the registry export.
+            docker buildx build --builder "$image_builder" --platform "$native_platform" \
+                --provenance=false --sbom=false --load --tag "$image" .
+            native_arch=${native_platform#linux/}
+            native_digest=$(jq -er --arg arch "$native_arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' "$image_check_dir/manifest.json")
+            remote_config=$(docker buildx imagetools inspect --raw "$image@$native_digest" | jq -er '.config.digest')
+            local_image_id=$(docker image inspect --format '{{.Id}}' "$image")
+            # Classic stores identify images by config; containerd stores may
+            # identify them by their platform manifest instead.
+            if [ "$local_image_id" != "$remote_config" ] && [ "$local_image_id" != "$native_digest" ]; then
+                echo "loaded image differs from published native image; no release tag was created" >&2
+                exit 1
+            fi
+            echo "$image is available in the local Docker image store."
+            ;;
+        *) echo "No native platform selected; skipping local image load." ;;
+    esac
     printf '%s %s\n' "$release_version" "$image_digest" >> release/image-digests.txt
     echo "Verified $image@$image_digest; GitHub will reuse this recorded image."
 fi

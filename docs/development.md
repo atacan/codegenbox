@@ -316,7 +316,16 @@ the registry digest against Buildx metadata and the selected platforms, then
 records that digest in `release/image-digests.txt` inside the release commit.
 GitHub still runs native validation, but skips the slow publishing build when
 the recorded digest matches the image already in Docker Hub. A failed local
-build or verification creates no release tag. A push followed by a later
+build or verification creates no release tag. After verifying the push, the
+script exports the native platform from the same build cache into the local
+Docker daemon under the release tag and checks its image ID against the
+published platform's manifest or configuration digest (depending on the local
+image store). Codegenbox finds this local image
+and does not pull it again. For multi-platform releases, only the native
+platform is loaded locally; if the selected platforms exclude the daemon's
+architecture, loading is skipped. Registry attestations remain on the pushed
+image, while the local export supports classic Docker image stores.
+A push followed by a later
 failure may leave the immutable image in the registry for manual inspection;
 the script will not overwrite it on retry.
 
