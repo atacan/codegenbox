@@ -266,6 +266,15 @@ and `no-new-privileges=true`; it has no Docker socket, `--privileged`, host
 home, source-repository parent, source Git metadata, SSH, or GitHub write
 credentials.
 
+New session workspaces contain a depth-1 snapshot of the selected local
+branch's captured commit (current `HEAD` by default), without other branches,
+tags, or older history. The source checkout and its shallow/partial-clone
+settings stay unchanged. If a partial source is missing files needed by that
+snapshot, startup downloads those objects through its existing promisor remote;
+older blobs are not hydrated. Network access and host authentication are needed
+only when required snapshot objects are missing. Continue reconstructs a depth-1
+workspace at the previously imported session tip.
+
 After Docker returns, Codegenbox validates and imports only the reserved
 `codegenbox/<session-id>` branch if it is the recorded base commit or a
 descendant. On resume or continue, that branch is atomically advanced only

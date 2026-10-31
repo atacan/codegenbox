@@ -126,7 +126,7 @@ workspace rule: it rejects any existing file, directory, or symlink at the
 recorded path and directs retained work to `resume`. It validates the recorded
 agent and repository, then resolves only the local generated
 `refs/heads/codegenbox/<id>` ref and requires it to exactly equal the recorded
-`ImportedCommit`. It creates a new self-contained clone at the same path,
+`ImportedCommit`. It creates a new self-contained depth-1 clone at the same path,
 checks out that trusted tip on the same branch, and runs the originally
 recorded adapter with the normal selected-state mounts and isolation. It never
 fetches or adopts remote state; externally moved local session refs fail
@@ -147,6 +147,22 @@ run `codegenbox push <id>` again after continuation to update the same PR
 branch. A session started with `--open-pr` persists `open_compare` in its
 metadata, so each later clean resume or continuation with a new imported commit
 uses the same safe host-side fixed-ref push and opens the same compare URL.
+
+Session setup uses `git init` plus a depth-1 fetch of the captured OID, so
+branch movement cannot select a different commit and no unrelated refs or
+history enter the workspace. The initialization uses an empty template and the
+source object format; Git hooks remain disabled. `GIT_NO_LAZY_FETCH=0` is scoped
+to this startup fetch from the trusted source, permitting its promisor remote
+to supply only missing snapshot objects. It is never enabled when importing
+from an agent-controlled clone. Source refs, partial-clone config, and shallow
+boundaries are preserved.
+
+Imports create an incremental bundle excluding the trusted base (or last
+imported tip for resumed/continued runs). This avoids exporting a shallow root
+with missing parents or altering source shallow metadata. No-op runs skip the
+empty bundle. Clone-side ancestry is checked against that trusted boundary;
+source-side ancestry is checked against the original base before the reserved
+ref is atomically advanced.
 
 ## Phase 6 hardening
 

@@ -13,10 +13,7 @@ import (
 	"strings"
 )
 
-const (
-	codegenboxRemote = "codegenbox-source"
-	workspaceRefRoot = "refs/heads/codegenbox/"
-)
+const workspaceRefRoot = "refs/heads/codegenbox/"
 
 var ErrDirtyClone = errors.New("session clone became dirty before cleanup")
 
@@ -83,7 +80,8 @@ func ResolveBaseBranch(ctx context.Context, repository Repository, branch string
 }
 
 // CreateSessionClone makes an independent clone whose complete Git directory
-// is within workspace. It intentionally does not retain a remote back to the
+// is within workspace. Only baseCommit and its snapshot are fetched (depth 1).
+// It intentionally does not retain a remote back to the
 // source repository: Docker mounts only this clone, not the source repository.
 func CreateSessionClone(ctx context.Context, repositoryRoot, workspace, branch, baseCommit string) error {
 	if err := validateSessionBranch(branch); err != nil {
@@ -101,11 +99,21 @@ func CreateSessionClone(ctx context.Context, repositoryRoot, workspace, branch, 
 		return fmt.Errorf("inspect session workspace %q: %w", workspace, err)
 	}
 
-	// --no-local prevents Git's local-clone optimization; --no-hardlinks makes
-	// the intent explicit for Git versions where a local transport is available.
-	// --no-checkout prevents clone-time checkout hooks from running.
-	if _, err := runAt(ctx, "", "clone", "--no-local", "--no-hardlinks", "--no-checkout", "--no-tags", "--origin", codegenboxRemote, "--", repositoryRoot, workspace); err != nil {
-		return fmt.Errorf("create independent session clone: %w", err)
+	// Initialize independently, then request exactly the captured commit. A
+	// local clone would otherwise copy unrelated refs/history (or hardlink the
+	// source object store). No remote or alternate survives in the workspace.
+	objectFormat := "sha1"
+	if len(baseCommit) == 64 {
+		objectFormat = "sha256"
+	}
+	if _, err := runAt(ctx, "", "init", "--template=", "--object-format="+objectFormat, "--", workspace); err != nil {
+		return fmt.Errorf("initialize independent session clone: %w", err)
+	}
+	// Only this startup fetch may lazily obtain missing snapshot objects from
+	// the trusted source's promisor remote. Depth 1 excludes historical blobs.
+	// Import from the agent-controlled workspace never enables lazy fetching.
+	if _, err := runAtWithEnvironment(ctx, workspace, []string{"GIT_NO_LAZY_FETCH=0"}, "fetch", "--depth=1", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--", repositoryRoot, baseCommit); err != nil {
+		return fmt.Errorf("fetch shallow session snapshot: %w", err)
 	}
 
 	// The branch exists only in the clone until post-exit import. This prevents
@@ -121,9 +129,6 @@ func CreateSessionClone(ctx context.Context, repositoryRoot, workspace, branch, 
 	}
 	if _, err := run(ctx, workspace, "config", "--local", "user.email", "codegenbox@localhost"); err != nil {
 		return fmt.Errorf("configure clone commit email: %w", err)
-	}
-	if _, err := run(ctx, workspace, "remote", "remove", codegenboxRemote); err != nil {
-		return fmt.Errorf("remove source remote from session clone: %w", err)
 	}
 	if _, err := validateCloneLayout(workspace); err != nil {
 		return fmt.Errorf("validate independent session clone: %w", err)
@@ -189,6 +194,16 @@ func ImportSessionBranch(ctx context.Context, repositoryRoot, workspace, branch,
 	if err := validateOID(baseCommit); err != nil {
 		return "", fmt.Errorf("invalid recorded base commit: %w", err)
 	}
+	// Continued shallow workspaces start at the previously imported tip, not
+	// the original base. Require each run to descend from that trusted tip;
+	// the source-side check below still verifies the original base ancestry.
+	boundary := baseCommit
+	if expectedImportedCommit != "" {
+		if err := validateOID(expectedImportedCommit); err != nil {
+			return "", fmt.Errorf("invalid recorded imported commit: %w", err)
+		}
+		boundary = expectedImportedCommit
+	}
 	gitDir, err := validateCloneLayout(workspace)
 	if err != nil {
 		return "", fmt.Errorf("validate session clone before import: %w", err)
@@ -205,12 +220,12 @@ func ImportSessionBranch(ctx context.Context, repositoryRoot, workspace, branch,
 		if err := validateOID(commit); err != nil {
 			return "", fmt.Errorf("validate expected clone commit: %w", err)
 		}
-		allowed, err := isAncestorInClone(ctx, gitDir, workspace, baseCommit, commit)
+		allowed, err := isAncestorInClone(ctx, gitDir, workspace, boundary, commit)
 		if err != nil {
 			return "", err
 		}
 		if !allowed {
-			return "", fmt.Errorf("import policy rejected %s: it is not %s or a descendant", commit, baseCommit)
+			return "", fmt.Errorf("import policy rejected %s: it is not %s or a descendant", commit, boundary)
 		}
 		return commit, nil
 	})
@@ -218,22 +233,26 @@ func ImportSessionBranch(ctx context.Context, repositoryRoot, workspace, branch,
 		return "", err
 	}
 
-	bundle, cleanupBundle, err := bundlePath(dataRoot)
-	if err != nil {
-		return "", err
-	}
-	defer cleanupBundle()
-	if _, err := withQuarantinedConfig(gitDir, func() (string, error) {
-		return runInClone(ctx, gitDir, workspace, "bundle", "create", bundle, workspaceRef(branch))
-	}); err != nil {
-		return "", fmt.Errorf("export expected clone branch: %w", err)
-	}
-
-	// Fetching an explicit bundle ref copies objects only. --no-write-fetch-head
-	// and --no-tags prevent transient or agent-created refs from landing in the
-	// source repository.
-	if _, err := run(ctx, repositoryRoot, "fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", bundle, workspaceRef(branch)); err != nil {
-		return "", fmt.Errorf("import clone objects: %w", err)
+	// A shallow root cannot be exported as a standalone bundle: its parents
+	// are intentionally absent. Export only commits after the trusted boundary
+	// and declare that existing source commit as a bundle prerequisite. A no-op
+	// needs no transfer at all (Git rejects empty bundles).
+	if commit != boundary {
+		bundle, cleanupBundle, err := bundlePath(dataRoot)
+		if err != nil {
+			return "", err
+		}
+		defer cleanupBundle()
+		if _, err := withQuarantinedConfig(gitDir, func() (string, error) {
+			return runInClone(ctx, gitDir, workspace, "bundle", "create", bundle, workspaceRef(branch), "^"+boundary)
+		}); err != nil {
+			return "", fmt.Errorf("export expected clone branch: %w", err)
+		}
+		// Fetch objects only; never accept shallow metadata or agent-created
+		// refs in the source. Its existing shallow/partial setup stays intact.
+		if _, err := run(ctx, repositoryRoot, "fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", bundle, workspaceRef(branch)); err != nil {
+			return "", fmt.Errorf("import clone objects: %w", err)
+		}
 	}
 	if _, err := run(ctx, repositoryRoot, "cat-file", "-e", commit+"^{commit}"); err != nil {
 		return "", fmt.Errorf("verify imported commit: %w", err)
@@ -251,9 +270,6 @@ func ImportSessionBranch(ctx context.Context, repositoryRoot, workspace, branch,
 	// never force-updates an unrelated or externally changed source ref.
 	expected := strings.Repeat("0", len(commit))
 	if expectedImportedCommit != "" {
-		if err := validateOID(expectedImportedCommit); err != nil {
-			return "", fmt.Errorf("invalid recorded imported commit: %w", err)
-		}
 		expected = expectedImportedCommit
 	}
 	if _, err := run(ctx, repositoryRoot, "update-ref", workspaceRef(branch), commit, expected); err != nil {
@@ -489,13 +505,17 @@ func run(ctx context.Context, directory string, args ...string) (string, error) 
 }
 
 func runAt(ctx context.Context, directory string, args ...string) (string, error) {
+	return runAtWithEnvironment(ctx, directory, nil, args...)
+}
+
+func runAtWithEnvironment(ctx context.Context, directory string, environment []string, args ...string) (string, error) {
 	commandArgs := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"}
 	if directory != "" {
 		commandArgs = append(commandArgs, "-C", directory)
 	}
 	commandArgs = append(commandArgs, args...)
 	cmd := exec.CommandContext(ctx, "git", commandArgs...)
-	cmd.Env = safeGitEnvironment()
+	cmd.Env = append(safeGitEnvironment(), environment...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
