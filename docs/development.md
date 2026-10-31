@@ -36,7 +36,7 @@ mounted, require no runtime `npx skills add`, and do not modify host state.
 The native image CI jobs check the skill and references as a mapped UID with
 all supported agent state directories mounted over empty test directories.
 
-The CLI default is `docker.io/atacandur/codegenbox:0.7.0`.
+The CLI default is `docker.io/atacandur/codegenbox:0.7.1`.
 `CODEGENBOX_IMAGE` remains the only supported image override for a compatible
 local, private, or test image; it must not alter the fixed command or mount
 contract. The published OCI index contains `linux/arm64` and `linux/amd64`
