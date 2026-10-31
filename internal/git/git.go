@@ -112,7 +112,9 @@ func CreateSessionClone(ctx context.Context, repositoryRoot, workspace, branch, 
 	// Only this startup fetch may lazily obtain missing snapshot objects from
 	// the trusted source's promisor remote. Depth 1 excludes historical blobs.
 	// Import from the agent-controlled workspace never enables lazy fetching.
-	if _, err := runAtWithEnvironment(ctx, workspace, []string{"GIT_NO_LAZY_FETCH=0"}, "fetch", "--depth=1", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--", repositoryRoot, baseCommit); err != nil {
+	// Disable automatic maintenance so fetch cannot leave background Git
+	// writers running after the session lifecycle considers it finished.
+	if _, err := runAtWithEnvironment(ctx, workspace, []string{"GIT_NO_LAZY_FETCH=0"}, "fetch", "--no-auto-maintenance", "--depth=1", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--", repositoryRoot, baseCommit); err != nil {
 		return fmt.Errorf("fetch shallow session snapshot: %w", err)
 	}
 
@@ -249,8 +251,9 @@ func ImportSessionBranch(ctx context.Context, repositoryRoot, workspace, branch,
 			return "", fmt.Errorf("export expected clone branch: %w", err)
 		}
 		// Fetch objects only; never accept shallow metadata or agent-created
-		// refs in the source. Its existing shallow/partial setup stays intact.
-		if _, err := run(ctx, repositoryRoot, "fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", bundle, workspaceRef(branch)); err != nil {
+		// refs in the source. Its existing shallow/partial setup stays intact;
+		// automatic maintenance must not outlive this controlled operation.
+		if _, err := run(ctx, repositoryRoot, "fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", bundle, workspaceRef(branch)); err != nil {
 			return "", fmt.Errorf("import clone objects: %w", err)
 		}
 	}
