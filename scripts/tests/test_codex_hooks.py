@@ -1,4 +1,4 @@
-"""Container hook overrides leave global files and shared state untouched."""
+"""Container hook overrides leave global files and session state untouched."""
 import importlib.machinery
 import importlib.util
 import json

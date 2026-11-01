@@ -49,6 +49,61 @@ func TestBuildRunInvocationContainsOnlySelectedAdapterState(t *testing.T) {
 	}
 }
 
+func TestBuildRunInvocationRejectsHostCodexSourcesIncludingLegacyOverrides(t *testing.T) {
+	for _, setting := range []string{"default", "CODEX_HOME", "CODEGENBOX_CODEX_STATE_DIR", "CODEGENBOX_CODEX_AUTH_FILE"} {
+		t.Run(setting, func(t *testing.T) {
+			base := t.TempDir()
+			home := filepath.Join(base, "host")
+			state := filepath.Join(home, ".codex")
+			workspace := filepath.Join(base, "workspace")
+			for _, path := range []string{home, state, workspace} {
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("HOME", home)
+			for _, key := range []string{"CODEX_HOME", "CODEGENBOX_CODEX_STATE_DIR", "CODEGENBOX_CODEX_AUTH_FILE"} {
+				t.Setenv(key, "")
+			}
+			if setting != "default" {
+				state = filepath.Join(base, "custom-auth")
+				if err := os.MkdirAll(state, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				value := state
+				if setting == "CODEGENBOX_CODEX_AUTH_FILE" {
+					value = filepath.Join(state, "auth.json")
+				}
+				t.Setenv(setting, value)
+			}
+			alias := filepath.Join(base, "auth-alias")
+			if err := os.Symlink(state, alias); err != nil {
+				t.Fatal(err)
+			}
+			for _, agent := range []string{"codex", "ori/codex", "claude"} {
+				destination := "/home/agent/.codex"
+				if agent == "claude" {
+					destination = "/home/agent/.claude"
+				}
+				sources := []string{state, alias, filepath.Dir(state), filepath.Join(state, "sessions")}
+				if setting == "CODEGENBOX_CODEX_AUTH_FILE" {
+					// An exact auth-file override protects that file and its
+					// ancestors; an unrelated sibling directory remains valid.
+					sources[3] = filepath.Join(state, "auth.json")
+				}
+				for _, source := range sources {
+					for _, readonly := range []bool{false, true} {
+						mount := StateMount{Agent: agent, Source: source, Destination: destination, ReadOnly: readonly}
+						if _, err := BuildRunInvocation("docker", "image", workspace, []string{"codex"}, nil, agent, nil, []StateMount{mount}); err == nil {
+							t.Fatalf("accepted host Codex source %#v", mount)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestBuildRunInvocationAllowsOnlyComposedOriProfileState(t *testing.T) {
 	stubHostIdentity(t, hostIdentity{uid: 501, gid: 20}, nil)
 	base := t.TempDir()

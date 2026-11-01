@@ -148,7 +148,7 @@ func (m Manager) Start(ctx context.Context, workingDirectory string, adapter age
 	if privateDependencyErr != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, privateDependencyErr)
 	}
-	stateMounts, stateErr := m.resolveState(adapter)
+	stateMounts, stateErr := m.resolveState(adapter, dataRoot, metadata.ID)
 	if stateErr != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, stateErr)
 	}
@@ -234,7 +234,7 @@ func (m Manager) Resume(ctx context.Context, id, image, dockerBinary string) (Re
 	if err != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, err)
 	}
-	stateMounts, err := m.resolveState(adapter)
+	stateMounts, err := m.resolveState(adapter, dataRoot, metadata.ID)
 	if err != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, err)
 	}
@@ -324,7 +324,7 @@ func (m Manager) Continue(ctx context.Context, id, image, dockerBinary string) (
 	if err != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, err)
 	}
-	stateMounts, err := m.resolveState(adapter)
+	stateMounts, err := m.resolveState(adapter, dataRoot, metadata.ID)
 	if err != nil {
 		return m.finish(ctx, dataRoot, repository.Root, result, err)
 	}
@@ -386,12 +386,11 @@ func acquireSessionLock(dataRoot, id string) (func(), error) {
 	return nil, fmt.Errorf("acquire session lock: concurrent update")
 }
 
-func (m Manager) resolveState(adapter agent.Adapter) ([]container.StateMount, error) {
-	resolver := m.StateResolver
-	if resolver == nil {
-		resolver = agent.ResolveState
+func (m Manager) resolveState(adapter agent.Adapter, dataRoot, id string) ([]container.StateMount, error) {
+	if m.StateResolver != nil {
+		return m.StateResolver(adapter)
 	}
-	return resolver(adapter)
+	return agent.ResolveSessionState(adapter, filepath.Join(dataRoot, "agent-state", id, "codex"))
 }
 
 func (m Manager) resolvePrivateDependencies() (container.PrivateDependencyAuthorization, error) {

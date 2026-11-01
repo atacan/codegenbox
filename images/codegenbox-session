@@ -16,8 +16,7 @@ done
 binary=$(command -v codex) || exit 127
 wrapper=()
 hook_wrapper="$(dirname "$0")/codegenbox-codex"
-# The mounted Codex state may describe a daemon installed on another OS, and
-# background processes must not outlive the agent lifecycle in this container.
+# Background processes must not outlive the agent lifecycle in this container.
 arguments=(--no-daemon "${@:2}")
 command=("$binary" "${arguments[@]}")
 child_pid=

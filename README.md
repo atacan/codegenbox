@@ -211,7 +211,7 @@ container's session menu:
 
 Updating/resuming keeps the same workspace, state mounts, and permissions.
 The launcher uses `--no-daemon` for startup and resume, keeping Codex in the
-container's foreground lifecycle instead of using a host-state daemon.
+container's foreground lifecycle.
 A failed update leaves the working Codex available so you can retry or resume.
 The update is container-local and disappears when that container ends; it does
 not change the published image or the host Codex installation. There is no
@@ -236,37 +236,65 @@ build or publish images during a normal session.
 ## Persistent agent state
 
 Codegenbox gives each run a synthetic container home, `/home/agent`; it never
-mounts host `$HOME`. State is mounted read-write because the CLIs can
-write login refresh data, settings, or conversation history.
+mounts host `$HOME`. Codex receives private state for each Codegenbox session,
+seeded only with a read-only snapshot of the host authentication file. Other
+agents' selected state directories remain mounted read-write.
 
 | Agent | Host path assumption | Container path/environment | Override |
 | --- | --- | --- | --- |
 | Claude Code | `~/.claude` | `/home/agent/.claude`, `HOME=/home/agent` | `CODEGENBOX_CLAUDE_STATE_DIR` |
-| Codex | `~/.codex` | `/home/agent/.codex`, `HOME`, `CODEX_HOME` | `CODEGENBOX_CODEX_STATE_DIR` |
+| Codex | private `<Codegenbox data root>/agent-state/<session-id>/codex` | `/home/agent/.codex`, `HOME`, `CODEX_HOME` | `CODEGENBOX_CODEX_AUTH_FILE` selects the authentication seed |
 | OpenCode | `$XDG_CONFIG_HOME/opencode` (or `~/.config/opencode`) and `$XDG_DATA_HOME/opencode` (or `~/.local/share/opencode`) | matching paths under `/home/agent`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | `CODEGENBOX_OPENCODE_CONFIG_DIR`, `CODEGENBOX_OPENCODE_DATA_DIR` |
 | Ori | `~/.ori` | `/home/agent/.ori`, `HOME=/home/agent` | `CODEGENBOX_ORI_STATE_DIR` |
 
 Direct adapters mount only their own paths. An Ori adapter mounts `~/.ori` plus
 only its selected child harness's paths; for example, Ori/Codex receives
-`.ori` and `.codex`, but not Claude or OpenCode state. An override must name
-that direct state directory; Codegenbox rejects host home, generic config/state
+host `.ori` and private session `.codex` state. Other agents' overrides must name
+their direct state directory; Codegenbox rejects host home, generic config/state
 parents, known cross-agent defaults, commas, and mount collisions. It has no
 user-controlled arbitrary mount flags.
 
-Codex keeps sharing authentication and history, but the image's Codex wrapper
-disables hooks declared in the mounted global `hooks.json` and `config.toml`
-(including a selected user profile) for container invocations. It passes
-per-hook `hooks.state` overrides to Codex; it never rewrites the host files or
-installs host-only hook programs such as DCG. Repository hooks and plugin hooks
-retain Codex's normal discovery and trust behavior. This applies to direct
-Codex, Ori/Codex, and Codex started from a container shell, including the
-session menu's updated binary. Calling `/usr/local/bin/codex` directly bypasses
-the wrapper. Existing images need rebuilding to gain this behavior.
+For direct Codex and Ori/Codex, the host CLI copies only `auth.json` into a new
+private home with mode `0700` and credentials with mode `0600`. The source is
+`$CODEX_HOME/auth.json` when set, otherwise `~/.codex/auth.json`.
+`CODEGENBOX_CODEX_AUTH_FILE=/absolute/path/auth.json` overrides the seed file.
+The legacy `CODEGENBOX_CODEX_STATE_DIR` now selects an **authentication source
+directory only**, ahead of host `CODEX_HOME`; its state is never mounted.
+Host configurations, hooks, sessions, SQLite databases, and plugin caches are
+never copied. Host authentication is opened read-only and is never written back
+or mounted, so host atomic credential replacement cannot leave a stale file
+bind mount. The private home uses file-backed credentials and the invoking
+non-root UID/GID, allowing Codex to write refreshes normally. This isolation is
+implemented by the host CLI and also works with existing Codegenbox images.
 
-Codex merges hook sources, so an empty project hook file cannot replace global
-hooks. See [Codex hooks](https://learn.chatgpt.com/docs/hooks). The wrapper uses
-Codex's per-hook enablement keys rather than disabling the hooks feature,
-preserving repository hooks.
+Private Codex state survives container removal, `codegenbox resume`, and
+`codegenbox continue`, including completed sessions whose workspace was removed.
+Existing private credentials are preserved rather than replaced by the seed.
+Different Codegenbox session IDs use different homes and databases. State is
+retained under `agent-state/<session-id>/codex` until you remove that directory
+after stopping its container; removing it discards that session's Codex history
+and credentials. Older sessions acquire a fresh private home on their next run;
+their former shared host history is not imported.
+
+OpenAI documents [auth-cache copying for headless machines](https://learn.chatgpt.com/docs/auth#fallback-authenticate-locally-and-copy-your-auth-cache)
+and [persisting refreshed credentials](https://learn.chatgpt.com/docs/auth/ci-cd-auth).
+Copied ChatGPT credentials can still contend when host and container sessions
+rotate the same OAuth grant, so reauthentication may be needed. For independent
+container login, set `CODEGENBOX_CODEX_AUTH_FILE=none` before starting a session
+and use Codex's **Sign in with Device Code** option (when enabled for your
+account/workspace). This disables seeding; it does not delete existing private
+credentials. A missing default cache, including a keyring-only host login,
+also starts with an empty private cache. An explicitly selected missing auth
+file reports an error. To reuse a keyring-only host login, first configure
+Codex's host credential storage as `file` and sign in again, as described in
+the linked OpenAI documentation.
+
+The image's Codex wrapper still disables user-global hooks declared inside its
+private `CODEX_HOME`, including selected profiles, using per-hook overrides.
+Repository and plugin hooks retain Codex's normal discovery and trust behavior.
+This applies to direct Codex, Ori/Codex, and Codex started from a container shell,
+including the session menu's updated binary. Calling `/usr/local/bin/codex`
+directly bypasses hook filtering while retaining the isolated session home.
 
 The default Codegenbox storage root is `~/.local/share/codegenbox` (or
 `$XDG_DATA_HOME/codegenbox`); set `CODEGENBOX_DATA_DIR` to override it. This

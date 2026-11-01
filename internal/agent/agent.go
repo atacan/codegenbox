@@ -34,9 +34,8 @@ type Adapter struct {
 	Model       string
 }
 
-// StateLocation maps one deliberately narrow host directory to a CLI's normal
-// in-container state location. Agent state is writable because authentication
-// refresh, settings, and conversation history are all written by these CLIs.
+// StateLocation describes a CLI's in-container state location. Codex's location
+// is backed by private session state, never its host authentication directory.
 type StateLocation struct {
 	Key         string
 	Destination string
@@ -60,7 +59,7 @@ func Resolve(name, model string) (Adapter, error) {
 	case Codex:
 		environment := homeEnvironment()
 		environment["CODEX_HOME"] = containerHome + "/.codex"
-		return Adapter{Name: Codex, Command: []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}, Environment: environment, State: []StateLocation{{Key: "CODEX_STATE_DIR", Destination: containerHome + "/.codex"}}, Description: "Runs Codex with its intentional container-only bypass mode and only CODEX_HOME state mounted."}, nil
+		return Adapter{Name: Codex, Command: []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}, Environment: environment, State: []StateLocation{{Key: "CODEX_STATE_DIR", Destination: containerHome + "/.codex"}}, Description: "Runs Codex with private session state seeded only with a copy of host authentication."}, nil
 	case OpenCode:
 		environment := homeEnvironment()
 		environment["XDG_CONFIG_HOME"] = containerHome + "/.config"
@@ -126,6 +125,13 @@ func Supported() []string { return []string{Claude, Codex, OpenCode, OriClaude, 
 // direct host paths. Environment overrides intentionally exist per agent, not
 // as a generic mount mechanism.
 func ResolveState(adapter Adapter) ([]container.StateMount, error) {
+	return ResolveSessionState(adapter, "")
+}
+
+// ResolveSessionState requires a Codegenbox-owned, per-session Codex directory
+// for Codex adapters. The legacy CODEGENBOX_CODEX_STATE_DIR override selects an
+// authentication source only; it can never restore a shared Codex home mount.
+func ResolveSessionState(adapter Adapter, codexHome string) ([]container.StateMount, error) {
 	homeRaw, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("resolve home directory for %s state: %w", adapter.Name, err)
@@ -161,6 +167,17 @@ func ResolveState(adapter Adapter) ([]container.StateMount, error) {
 	parents := []string{home, xdgConfig, xdgData, filepath.Join(home, ".local")}
 	mounts := make([]container.StateMount, 0, len(adapter.State))
 	for _, location := range adapter.State {
+		if location.Key == "CODEX_STATE_DIR" {
+			if codexHome == "" {
+				return nil, fmt.Errorf("Codex requires private per-session state")
+			}
+			path, err := prepareCodexHome(codexHome)
+			if err != nil {
+				return nil, err
+			}
+			mounts = append(mounts, container.StateMount{Agent: adapter.Name, Source: path, Destination: location.Destination})
+			continue
+		}
 		path := strings.TrimSpace(os.Getenv("CODEGENBOX_" + location.Key))
 		if path == "" {
 			path = defaults[location.Key]

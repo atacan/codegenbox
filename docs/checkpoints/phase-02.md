@@ -1,5 +1,10 @@
 # Phase 02 checkpoint — Agent Persistence
 
+Historical checkpoint: the Codex full-home mount described below has been
+replaced by private per-session state seeded only with `auth.json`. See
+[Persistent agent state](../../README.md#persistent-agent-state) for current
+behavior, including authentication-source overrides and migration.
+
 **Status:** implementation, automated verification, and independent security review completed on 2026-09-05. Live persistence verification has passed for Codex and OpenCode; Claude remains to be checked. No later phase has been started.
 
 ## Implemented

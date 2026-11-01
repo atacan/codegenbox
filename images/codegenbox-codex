@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Codex with host-global hooks disabled only for this invocation."""
+"""Run Codex with user-global hooks disabled only for this invocation."""
 import json
 import os
 from pathlib import Path
@@ -11,7 +11,7 @@ import tomllib
 def overrides(home, arguments=()):
     # Codex 0.166's hook registry keys are absolute source path, snake-case
     # event, matcher index, handler index. SessionFlags override User state.
-    # Preserve CODEX_HOME so authentication, refreshes, and history stay shared.
+    # Preserve the private session CODEX_HOME for refreshes and saved history.
     states = {}
     paths = [home / "hooks.json", home / "config.toml"]
     for index, argument in enumerate(arguments):
@@ -59,7 +59,7 @@ def main():
     try:
         flags = overrides(home, arguments)
     except (OSError, ValueError, TypeError, AttributeError) as error:
-        print(f"Codegenbox could not isolate host Codex hooks: {error}", file=sys.stderr)
+        print(f"Codegenbox could not isolate user Codex hooks: {error}", file=sys.stderr)
         return 1
     # Last config override wins; keep literal prompt arguments after -- intact.
     index = arguments.index("--") if "--" in arguments else len(arguments)

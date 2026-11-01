@@ -950,6 +950,95 @@ func TestSelectedAgentStateSurvivesReplacementWithoutCrossAgentMounts(t *testing
 	}
 }
 
+func TestProductionCodexStateIsPrivateAndPersistsAcrossLifecycle(t *testing.T) {
+	for _, name := range []string{agent.Codex, agent.OriCodex} {
+		t.Run(name, func(t *testing.T) {
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", home)
+			for _, key := range []string{"CODEX_HOME", "CODEGENBOX_CODEX_STATE_DIR", "CODEGENBOX_CODEX_AUTH_FILE", "CODEGENBOX_ORI_STATE_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME"} {
+				t.Setenv(key, "")
+			}
+			host := filepath.Join(home, ".codex")
+			if err := os.MkdirAll(host, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(host, "auth.json"), "fake-auth-fixture")
+			writeFile(t, filepath.Join(host, "thread_history_1.sqlite"), "host-database-sentinel")
+			repository := newRepository(t)
+			dataRoot := filepath.Join(home, "codegenbox")
+			adapter, _ := agent.Lookup(name)
+			var private string
+			calls := 0
+			manager := testManager(dataRoot, runnerFunc(func(_ context.Context, invocation container.Invocation) error {
+				calls++
+				var source string
+				for _, mount := range valuesAfterInvocation(invocation.Args, "--mount") {
+					if strings.HasSuffix(mount, ",dst=/home/agent/.codex") {
+						source = strings.TrimSuffix(strings.TrimPrefix(mount, "type=bind,src="), ",dst=/home/agent/.codex")
+					}
+				}
+				if source == "" || source == host || !isWithin(source, dataRoot) {
+					t.Fatalf("unsafe or missing private Codex source %q", source)
+				}
+				contents, err := os.ReadFile(filepath.Join(source, "auth.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				workspace := invocationWorktree(t, invocation)
+				if calls == 1 {
+					private = source
+					if string(contents) != "fake-auth-fixture" {
+						t.Fatal("first run did not seed authentication")
+					}
+					writeFile(t, filepath.Join(source, "auth.json"), "refreshed-private-fixture")
+					writeFile(t, filepath.Join(source, "thread_history_1.sqlite"), "container-database-sentinel")
+					writeFile(t, filepath.Join(workspace, "dirty.txt"), "retain")
+				} else if calls < 4 {
+					if source != private || string(contents) != "refreshed-private-fixture" {
+						t.Fatal("resume/continue changed private home or reseeded authentication")
+					}
+					if calls == 2 {
+						if err := os.Remove(filepath.Join(workspace, "dirty.txt")); err != nil {
+							t.Fatal(err)
+						}
+					}
+				} else if source == private || string(contents) != "fake-auth-fixture" {
+					t.Fatal("new session reused another session's private state")
+				}
+				return nil
+			}))
+			manager.StateResolver = nil // Exercise the production authentication/state resolver.
+			initial, err := manager.Start(context.Background(), repository, adapter, "image", "docker")
+			if err != nil || initial.Metadata.State != StateDirty {
+				t.Fatalf("start = %#v, %v", initial, err)
+			}
+			resumed, err := manager.Resume(context.Background(), initial.Metadata.ID, "image", "docker")
+			if err != nil || !resumed.WorkspaceRemoved {
+				t.Fatalf("resume = %#v, %v", resumed, err)
+			}
+			continued, err := manager.Continue(context.Background(), initial.Metadata.ID, "image", "docker")
+			if err != nil || !continued.WorkspaceRemoved {
+				t.Fatalf("continue = %#v, %v", continued, err)
+			}
+			manager.NewID = func(string, time.Time) (string, error) { return "project-20260903-193013-a830", nil }
+			if _, err := manager.Start(context.Background(), repository, adapter, "image", "docker"); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 4 {
+				t.Fatalf("runner calls = %d", calls)
+			}
+			auth, _ := os.ReadFile(filepath.Join(host, "auth.json"))
+			database, _ := os.ReadFile(filepath.Join(host, "thread_history_1.sqlite"))
+			if string(auth) != "fake-auth-fixture" || string(database) != "host-database-sentinel" {
+				t.Fatal("lifecycle modified host Codex state")
+			}
+		})
+	}
+}
+
 func selectedStateSource(t *testing.T, invocation container.Invocation, name string) string {
 	t.Helper()
 	mounts := valuesAfterInvocation(invocation.Args, "--mount")

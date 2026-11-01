@@ -11,10 +11,10 @@ collisions, and the Docker socket. It never accepts a user mount flag.
 | Adapter | Production-image command | State mounts | Environment |
 | --- | --- | --- | --- |
 | Claude | `claude` | host `~/.claude` → `/home/agent/.claude` | `HOME=/home/agent` |
-| Codex | `codex --dangerously-bypass-approvals-and-sandbox` | host `~/.codex` → `/home/agent/.codex` | `HOME=/home/agent`, `CODEX_HOME=/home/agent/.codex` |
+| Codex | `codex --dangerously-bypass-approvals-and-sandbox` | private `<data-root>/agent-state/<session-id>/codex` → `/home/agent/.codex`, seeded only with copied host `auth.json` | `HOME=/home/agent`, `CODEX_HOME=/home/agent/.codex` |
 | OpenCode | `opencode` | host XDG config/data `opencode` children → matching `/home/agent` XDG children | `HOME`, `XDG_CONFIG_HOME=/home/agent/.config`, `XDG_DATA_HOME=/home/agent/.local/share` |
 | Ori/Claude | `ori claude [--model <id>]` | host `~/.ori` and `~/.claude` → matching `/home/agent` children | `HOME=/home/agent` |
-| Ori/Codex | `ori codex [--model <id>] --dangerously-bypass-approvals-and-sandbox` | host `~/.ori` and `~/.codex` → matching `/home/agent` children | `HOME`, `CODEX_HOME=/home/agent/.codex` |
+| Ori/Codex | `ori codex [--model <id>] --dangerously-bypass-approvals-and-sandbox` | host `~/.ori` plus the same private per-session Codex home | `HOME`, `CODEX_HOME=/home/agent/.codex` |
 | Ori/OpenCode | `ori opencode [--model <id>]` | host `~/.ori` and selected OpenCode XDG children → matching `/home/agent` children | `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` |
 
 The production image replaces the Node proof image. It contains Ubuntu 24.04
@@ -44,12 +44,40 @@ manifests. Its release evidence and resolved Ubuntu package inventory are in
 the Phase 3 checkpoint.
 
 For an unusual installation, override only the required direct agent state
-location with `CODEGENBOX_CLAUDE_STATE_DIR`, `CODEGENBOX_CODEX_STATE_DIR`,
+location with `CODEGENBOX_CLAUDE_STATE_DIR`,
 `CODEGENBOX_OPENCODE_CONFIG_DIR`, `CODEGENBOX_OPENCODE_DATA_DIR`, or
 `CODEGENBOX_ORI_STATE_DIR`. Overrides do not permit host home, generic XDG
 parents, commas, or known another-agent default state. Missing selected
-directories are created mode 0700; existing directories are not chmodded or
-read by Codegenbox.
+directories are created mode 0700; existing non-Codex directories are not
+chmodded or read by Codegenbox.
+
+Codex state is always private to a Codegenbox session. The production resolver
+uses `<data-root>/agent-state/<session-id>/codex` for Start, Resume, and Continue;
+it is retained independently of the workspace and disposable container. The
+host CLI opens only the source `auth.json` read-only and copies its bytes to a
+new mode-0600 file if private credentials are absent. It never links files or
+copies host config, hooks, databases, sessions, or caches. The private directory
+is mode 0700 and has a private config selecting file-backed credentials.
+Existing private credentials/config are retained; linked private auth or config
+files and symlinked private homes are rejected. Docker runs as the invoking
+non-root UID/GID, preserving private file ownership and refresh writes. No
+image rebuild is required for isolation with existing compatible images.
+
+`CODEGENBOX_CODEX_AUTH_FILE` selects an exact seed file, or `none` disables
+seeding for an independent device-code login. Otherwise the source directory
+is the legacy `CODEGENBOX_CODEX_STATE_DIR`, host `CODEX_HOME`, or `~/.codex`, in
+that order. The legacy override never selects a mount destination. A missing
+default cache permits first-run login; an explicitly missing file is an error.
+The builder independently rejects every mount overlapping a host Codex source
+directory or an exact auth file, including canonicalized aliases. Per-session
+homes prevent database/history sharing; copied OAuth grants can still contend
+on refresh, requiring a new login. See [OpenAI authentication](https://learn.chatgpt.com/docs/auth)
+and [auth persistence](https://learn.chatgpt.com/docs/auth/ci-cd-auth).
+
+Sessions created before this isolation change start with new private Codex
+state on their next run; shared host history is never imported. State is
+retained after completion and can be removed manually under
+`agent-state/<session-id>/codex` once its container has stopped.
 
 Ori is a composed adapter rather than a generic pass-through. Metadata records
 `ori/claude`, `ori/codex`, or `ori/opencode`, plus an optional model. Resume and
@@ -125,13 +153,12 @@ The image entrypoint `images/codegenbox-session` passes through other commands
 with `exec`; the host CLI, fixed agent commands, and compatibility v2 contract
 remain unchanged. Direct interactive Codex runs as a child with inherited
 terminal input. After it exits, the launcher offers finish, resume, or update
-and resume. It adds `--no-daemon` to initial and resumed invocations: mounted
-Codex state can reference an unavailable host daemon, and a background daemon
-would escape the launcher's foreground process lifecycle.
+and resume. It adds `--no-daemon` to initial and resumed invocations: private
+Codex state must not start a background daemon that escapes the launcher's
+foreground process lifecycle.
 Resume opens the `codex resume` picker, preserving the original adapter
-arguments. It deliberately avoids `--last`: different Codegenbox containers
-share the saved cwd `/workspace`, so automatic selection could reopen another
-concurrent session's conversation. The user selects the saved conversation. Signals are forwarded to the child,
+arguments. It deliberately avoids `--last` so the user selects the saved
+conversation within that Codegenbox session's private history. Signals are forwarded to the child,
 and the launcher waits before returning so host import cannot race Codex.
 EOF and finish return the last Codex exit status. Non-TTY runs bypass the menu.
 

@@ -85,10 +85,10 @@ var allowedDestinations = map[string]map[string]bool{
 
 var allowedStateSources = map[string]map[string]bool{
 	"claude":       {"claude": true},
-	"codex":        {"codex": true},
+	"codex":        {},
 	"opencode":     {"opencode-config": true, "opencode-data": true},
 	"ori/claude":   {"ori": true, "claude": true},
-	"ori/codex":    {"ori": true, "codex": true},
+	"ori/codex":    {"ori": true},
 	"ori/opencode": {"ori": true, "opencode-config": true, "opencode-data": true},
 }
 
@@ -341,6 +341,9 @@ func validateStateMount(agent string, mount StateMount, workspacePath string, pr
 	if err != nil {
 		return fmt.Errorf("invalid state mount source: %w", err)
 	}
+	if err := ValidatePrivateCodexPath(source); err != nil {
+		return err
+	}
 	socket, socketErr := canonicalExistingPath("/var/run/docker.sock")
 	if socketErr == nil && source == socket {
 		return fmt.Errorf("refusing Docker socket mount")
@@ -384,6 +387,33 @@ func validateStateMount(agent string, mount StateMount, workspacePath string, pr
 		}
 	}
 	seen["source:"+source] = true
+	return nil
+}
+
+// ValidatePrivateCodexPath rejects mounting any part of host Codex state,
+// including legacy override sources and aliases. Authentication is copied by
+// the host CLI into separate session storage, never mounted from its source.
+func ValidatePrivateCodexPath(source string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve host home for Codex isolation: %w", err)
+	}
+	paths := []string{filepath.Join(home, ".codex"), os.Getenv("CODEX_HOME"), os.Getenv("CODEGENBOX_CODEX_STATE_DIR")}
+	if auth := strings.TrimSpace(os.Getenv("CODEGENBOX_CODEX_AUTH_FILE")); auth != "" && auth != "none" {
+		paths = append(paths, auth)
+	}
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		canonical, err := canonicalExistingPath(strings.TrimSpace(path))
+		if err != nil {
+			return fmt.Errorf("resolve host Codex source for isolation: %w", err)
+		}
+		if isWithin(source, canonical) || isWithin(canonical, source) {
+			return fmt.Errorf("refusing host Codex state mount; use private per-session Codex state seeded only with auth.json")
+		}
+	}
 	return nil
 }
 
