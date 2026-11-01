@@ -181,6 +181,8 @@ RUN npm install --global --no-audit --no-fund "npm@${NPM_VERSION}" "pnpm@${PNPM_
 
 # Ori is a standalone binary. Download the immutable release asset directly
 # instead of executing its installer, and verify the target-specific checksum.
+# Its bundled Bun runtime can spin under QEMU even for --version; execute the
+# version check only on the matching native builder, as with the smoke suite.
 RUN case "${TARGETARCH}" in \
         amd64) ori_arch=x64; ori_sha256="${ORI_SHA256_AMD64}" ;; \
         arm64) ori_arch=arm64; ori_sha256="${ORI_SHA256_ARM64}" ;; \
@@ -192,7 +194,11 @@ RUN case "${TARGETARCH}" in \
     && echo "${ori_sha256}  /tmp/ori" | sha256sum --check --strict \
     && install -m 0755 /tmp/ori /usr/local/bin/ori \
     && rm /tmp/ori \
-    && ORI_NO_UPDATE_CHECK=1 ORI_TELEMETRY=0 ori --version | grep --fixed-strings --quiet "${ORI_VERSION}"
+    && if [ "${TARGETARCH}" = "${BUILDARCH}" ]; then \
+        ORI_NO_UPDATE_CHECK=1 ORI_TELEMETRY=0 ori --version | grep --fixed-strings --quiet "${ORI_VERSION}"; \
+    else \
+        echo "cross-build (${BUILDARCH} -> ${TARGETARCH}): Ori version check deferred to native CI"; \
+    fi
 
 # Ensure every tool is present for the target platform.  Full executable smoke
 # tests run only on a native builder: QEMU can itself crash otherwise-valid
