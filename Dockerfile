@@ -255,12 +255,12 @@ RUN echo "Codex refresh: ${CODEX_REFRESH}" \
     fi \
     && npm cache clean --force
 
-# The CLI mounts only per-agent state below this synthetic home. Remove caches
+# The CLI mounts only private per-session state below this synthetic home. Remove caches
 # created by build-time smoke tests before constructing it: Codegenbox runs the
 # image as the invoking host UID:GID, which deliberately differs from the
 # image's fixed agent UID:GID. Writable synthetic-home directories therefore
 # use sticky world-writable permissions. There is only one unprivileged user in
-# a Codegenbox container, and the host state mounts retain their host ownership
+# a Codegenbox container, and private state mounts retain their invoking-user ownership
 # and permissions when mounted over these empty destinations.
 RUN groupadd --gid 10001 agent \
     && useradd --uid 10001 --gid agent --create-home --home-dir /home/agent --shell /bin/bash agent \
@@ -269,10 +269,11 @@ RUN groupadd --gid 10001 agent \
     && find /home/agent -type d -exec chmod 1777 {} +
 
 # Install the complete upstream skill (including its reference files) from the
-# same immutable revision as the binary. Keep it outside mounted agent state:
+# same immutable revision as the binary. Keep the source outside private state mounts:
 # Codex/OpenCode read ~/.agents/skills; Claude reads the machine policy path.
 # Ori delegates discovery to its selected harness. No runtime installer or
-# mutation of host-mounted skills/configuration is needed.
+# mutation of host skills/configuration is needed. The CLI preserves this skill
+# through a fixed container-internal fallback link in private shared skills.
 RUN curl --fail --location --silent --show-error "https://codeload.github.com/atacan/srcmv/tar.gz/${SRCMV_REVISION}" -o /tmp/srcmv-source.tar.gz \
     && echo "${SRCMV_SOURCE_SHA256}  /tmp/srcmv-source.tar.gz" | sha256sum --check --strict \
     && install -d --mode=0755 /opt/codegenbox/skills \

@@ -76,20 +76,11 @@ type StateMount struct {
 
 var allowedDestinations = map[string]map[string]bool{
 	"claude":       {"/home/agent/.claude": true},
-	"codex":        {"/home/agent/.codex": true},
-	"opencode":     {"/home/agent/.config/opencode": true, "/home/agent/.local/share/opencode": true},
+	"codex":        {"/home/agent/.codex": true, "/home/agent/.agents/skills": true},
+	"opencode":     {"/home/agent/.config/opencode": true, "/home/agent/.local/share/opencode": true, "/home/agent/.agents/skills": true},
 	"ori/claude":   {"/home/agent/.ori": true, "/home/agent/.claude": true},
-	"ori/codex":    {"/home/agent/.ori": true, "/home/agent/.codex": true},
-	"ori/opencode": {"/home/agent/.ori": true, "/home/agent/.config/opencode": true, "/home/agent/.local/share/opencode": true},
-}
-
-var allowedStateSources = map[string]map[string]bool{
-	"claude":       {"claude": true},
-	"codex":        {},
-	"opencode":     {"opencode-config": true, "opencode-data": true},
-	"ori/claude":   {"ori": true, "claude": true},
-	"ori/codex":    {"ori": true},
-	"ori/opencode": {"ori": true, "opencode-config": true, "opencode-data": true},
+	"ori/codex":    {"/home/agent/.ori": true, "/home/agent/.codex": true, "/home/agent/.agents/skills": true},
+	"ori/opencode": {"/home/agent/.ori": true, "/home/agent/.config/opencode": true, "/home/agent/.local/share/opencode": true, "/home/agent/.agents/skills": true},
 }
 
 func BuildRunInvocation(binary, image, workspacePath string, command []string, environment []string, selectedAgent string, protectedSources []string, stateMounts []StateMount, options ...any) (Invocation, error) {
@@ -341,7 +332,7 @@ func validateStateMount(agent string, mount StateMount, workspacePath string, pr
 	if err != nil {
 		return fmt.Errorf("invalid state mount source: %w", err)
 	}
-	if err := ValidatePrivateCodexPath(source); err != nil {
+	if err := ValidatePrivateStatePath(source); err != nil {
 		return err
 	}
 	socket, socketErr := canonicalExistingPath("/var/run/docker.sock")
@@ -351,14 +342,6 @@ func validateStateMount(agent string, mount StateMount, workspacePath string, pr
 	for _, forbidden := range canonicalStateParents() {
 		if source == forbidden {
 			return fmt.Errorf("refusing host home or generic state-parent mount")
-		}
-	}
-	for name, path := range canonicalAgentStatePaths() {
-		if allowedStateSources[agent][name] {
-			continue
-		}
-		if source == path || isWithin(source, path) || isWithin(path, source) {
-			return fmt.Errorf("state mount source aliases %s state", name)
 		}
 	}
 	seenSources := seen["source:"+source]
@@ -394,13 +377,24 @@ func validateStateMount(agent string, mount StateMount, workspacePath string, pr
 // including legacy override sources and aliases. Authentication is copied by
 // the host CLI into separate session storage, never mounted from its source.
 func ValidatePrivateCodexPath(source string) error {
+	return ValidatePrivateStatePath(source)
+}
+
+// ValidatePrivateStatePath rejects every host agent state/authentication source,
+// including custom seed directories and symlink aliases, for every adapter.
+func ValidatePrivateStatePath(source string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve host home for Codex isolation: %w", err)
 	}
-	paths := []string{filepath.Join(home, ".codex"), os.Getenv("CODEX_HOME"), os.Getenv("CODEGENBOX_CODEX_STATE_DIR")}
-	if auth := strings.TrimSpace(os.Getenv("CODEGENBOX_CODEX_AUTH_FILE")); auth != "" && auth != "none" {
-		paths = append(paths, auth)
+	paths := []string{filepath.Join(home, ".agents", "skills"), filepath.Join(home, ".openrouter"), os.Getenv("CODEX_HOME"), os.Getenv("CLAUDE_CONFIG_DIR")}
+	for _, path := range canonicalAgentStatePaths() {
+		paths = append(paths, path)
+	}
+	for _, key := range []string{"CLAUDE_STATE_DIR", "CODEX_STATE_DIR", "OPENCODE_CONFIG_DIR", "OPENCODE_DATA_DIR", "ORI_STATE_DIR", "AGENT_SKILLS_DIR", "CLAUDE_AUTH_FILE", "CODEX_AUTH_FILE", "OPENCODE_AUTH_FILE", "ORI_AUTH_FILE"} {
+		if value := strings.TrimSpace(os.Getenv("CODEGENBOX_" + key)); value != "" && value != "none" {
+			paths = append(paths, value)
+		}
 	}
 	for _, path := range paths {
 		if strings.TrimSpace(path) == "" {
@@ -408,10 +402,10 @@ func ValidatePrivateCodexPath(source string) error {
 		}
 		canonical, err := canonicalExistingPath(strings.TrimSpace(path))
 		if err != nil {
-			return fmt.Errorf("resolve host Codex source for isolation: %w", err)
+			return fmt.Errorf("resolve host agent source for isolation: %w", err)
 		}
 		if isWithin(source, canonical) || isWithin(canonical, source) {
-			return fmt.Errorf("refusing host Codex state mount; use private per-session Codex state seeded only with auth.json")
+			return fmt.Errorf("refusing host agent state mount; use private per-session state seeded only with selected authentication, settings, and skills")
 		}
 	}
 	return nil

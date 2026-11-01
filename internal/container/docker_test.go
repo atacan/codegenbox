@@ -109,8 +109,8 @@ func TestBuildRunInvocationAllowsOnlyComposedOriProfileState(t *testing.T) {
 	base := t.TempDir()
 	home := filepath.Join(base, "home")
 	workspace := filepath.Join(base, "workspace")
-	oriState := filepath.Join(home, ".ori")
-	claudeState := filepath.Join(home, ".claude")
+	oriState := filepath.Join(base, "private", "ori")
+	claudeState := filepath.Join(base, "private", "claude")
 	codexState := filepath.Join(home, ".codex")
 	for _, path := range []string{workspace, oriState, claudeState, codexState, filepath.Join(home, ".config"), filepath.Join(home, ".local", "share")} {
 		if err := os.MkdirAll(path, 0o700); err != nil {

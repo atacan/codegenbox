@@ -14,12 +14,12 @@ func TestAdaptersHaveDistinctCommandsStateAndEnvironment(t *testing.T) {
 		destinations []string
 		environment  []string
 	}{
-		{Claude, []string{"claude"}, []string{"/home/agent/.claude"}, []string{"HOME=/home/agent"}},
-		{Codex, []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}, []string{"/home/agent/.codex"}, []string{"CODEX_HOME=/home/agent/.codex", "HOME=/home/agent"}},
-		{OpenCode, []string{"opencode"}, []string{"/home/agent/.config/opencode", "/home/agent/.local/share/opencode"}, []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_DATA_HOME=/home/agent/.local/share"}},
-		{OriClaude, []string{"ori", "claude"}, []string{"/home/agent/.ori", "/home/agent/.claude"}, []string{"HOME=/home/agent"}},
-		{OriCodex, []string{"ori", "codex", "--dangerously-bypass-approvals-and-sandbox"}, []string{"/home/agent/.ori", "/home/agent/.codex"}, []string{"CODEX_HOME=/home/agent/.codex", "HOME=/home/agent"}},
-		{OriOpenCode, []string{"ori", "opencode"}, []string{"/home/agent/.ori", "/home/agent/.config/opencode", "/home/agent/.local/share/opencode"}, []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_DATA_HOME=/home/agent/.local/share"}},
+		{Claude, []string{"claude"}, []string{"/home/agent/.claude"}, []string{"CLAUDE_CONFIG_DIR=/home/agent/.claude", "HOME=/home/agent"}},
+		{Codex, []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}, []string{"/home/agent/.codex", "/home/agent/.agents/skills"}, []string{"CODEX_HOME=/home/agent/.codex", "HOME=/home/agent"}},
+		{OpenCode, []string{"opencode"}, []string{"/home/agent/.config/opencode", "/home/agent/.local/share/opencode", "/home/agent/.agents/skills"}, []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_DATA_HOME=/home/agent/.local/share"}},
+		{OriClaude, []string{"ori", "claude"}, []string{"/home/agent/.ori", "/home/agent/.claude"}, []string{"CLAUDE_CONFIG_DIR=/home/agent/.claude", "HOME=/home/agent"}},
+		{OriCodex, []string{"ori", "codex", "--dangerously-bypass-approvals-and-sandbox"}, []string{"/home/agent/.ori", "/home/agent/.codex", "/home/agent/.agents/skills"}, []string{"CODEX_HOME=/home/agent/.codex", "HOME=/home/agent"}},
+		{OriOpenCode, []string{"ori", "opencode"}, []string{"/home/agent/.ori", "/home/agent/.config/opencode", "/home/agent/.local/share/opencode", "/home/agent/.agents/skills"}, []string{"HOME=/home/agent", "XDG_CONFIG_HOME=/home/agent/.config", "XDG_DATA_HOME=/home/agent/.local/share"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -76,67 +76,12 @@ func TestResolveAddsValidatedModelOnlyToOriCommands(t *testing.T) {
 	}
 }
 
-func TestResolveStateCanonicalizesAliasesAndRejectsCrossAgentOrDuplicateSources(t *testing.T) {
-	base := t.TempDir()
-	home := filepath.Join(base, "home")
-	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	homeAlias := filepath.Join(base, "home-alias")
-	if err := os.Symlink(home, homeAlias); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", homeAlias)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(homeAlias, ".config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(homeAlias, ".local", "share"))
-	claude, _ := Lookup(Claude)
-	t.Setenv("CODEGENBOX_CLAUDE_STATE_DIR", homeAlias)
-	if _, err := ResolveState(claude); err == nil {
-		t.Fatal("host-home symlink alias accepted")
-	}
-	config := filepath.Join(base, "config")
-	if err := os.MkdirAll(config, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	configAlias := filepath.Join(base, "config-alias")
-	if err := os.Symlink(config, configAlias); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CODEGENBOX_CLAUDE_STATE_DIR", configAlias)
-	t.Setenv("XDG_CONFIG_HOME", configAlias)
-	if _, err := ResolveState(claude); err == nil {
-		t.Fatal("generic config symlink alias accepted")
-	}
-	codexAlias := filepath.Join(base, "codex-alias")
-	if err := os.Symlink(filepath.Join(home, ".codex"), codexAlias); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CODEGENBOX_CLAUDE_STATE_DIR", codexAlias)
-	if _, err := ResolveState(claude); err == nil {
-		t.Fatal("cross-agent symlink alias accepted")
-	}
-	custom := filepath.Join(base, "custom")
-	if err := os.MkdirAll(custom, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	customAlias := filepath.Join(base, "custom-alias")
-	if err := os.Symlink(custom, customAlias); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CODEGENBOX_CLAUDE_STATE_DIR", customAlias)
-	canonicalCustom, err := filepath.EvalSymlinks(custom)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mounts, err := ResolveState(claude)
-	if err != nil || len(mounts) != 1 || mounts[0].Source != canonicalCustom {
-		t.Fatalf("valid canonical symlink state = %#v, %v", mounts, err)
-	}
-	openCode, _ := Lookup(OpenCode)
-	t.Setenv("CODEGENBOX_OPENCODE_CONFIG_DIR", customAlias)
-	t.Setenv("CODEGENBOX_OPENCODE_DATA_DIR", customAlias)
-	if _, err := ResolveState(openCode); err == nil {
-		t.Fatal("duplicate canonical OpenCode state sources accepted")
+func TestResolveStateRequiresPrivateSessionRoot(t *testing.T) {
+	for _, name := range Supported() {
+		adapter, _ := Lookup(name)
+		if _, err := ResolveState(adapter); err == nil {
+			t.Fatalf("%s accepted state resolution without private session root", name)
+		}
 	}
 }
 
@@ -156,11 +101,12 @@ func TestResolveStateForOriIncludesOnlyOriAndSelectedHarnessState(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	mounts, err := ResolveState(adapter)
+	canonicalBase, _ := filepath.EvalSymlinks(base)
+	mounts, err := ResolveSessionState(adapter, filepath.Join(canonicalBase, "private"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDestinations := []string{"/home/agent/.ori", "/home/agent/.config/opencode", "/home/agent/.local/share/opencode"}
+	wantDestinations := []string{"/home/agent/.ori", "/home/agent/.config/opencode", "/home/agent/.local/share/opencode", "/home/agent/.agents/skills"}
 	if len(mounts) != len(wantDestinations) {
 		t.Fatalf("mounts = %#v", mounts)
 	}
@@ -169,12 +115,12 @@ func TestResolveStateForOriIncludesOnlyOriAndSelectedHarnessState(t *testing.T) 
 			t.Fatalf("mount %d = %#v", index, mount)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(home, ".ori")); err != nil {
-		t.Fatalf("Ori state was not created: %v", err)
+	if _, err := os.Stat(filepath.Join(home, ".ori")); !os.IsNotExist(err) {
+		t.Fatalf("host Ori state was created: %v", err)
 	}
 
 	t.Setenv("CODEGENBOX_ORI_STATE_DIR", filepath.Join(home, ".codex"))
-	if _, err := ResolveState(adapter); err == nil {
+	if _, err := ResolveSessionState(adapter, filepath.Join(canonicalBase, "other-private")); err == nil {
 		t.Fatal("Ori state override accepted Codex state")
 	}
 }

@@ -390,7 +390,7 @@ func (m Manager) resolveState(adapter agent.Adapter, dataRoot, id string) ([]con
 	if m.StateResolver != nil {
 		return m.StateResolver(adapter)
 	}
-	return agent.ResolveSessionState(adapter, filepath.Join(dataRoot, "agent-state", id, "codex"))
+	return agent.ResolveSessionState(adapter, filepath.Join(dataRoot, "agent-state", id))
 }
 
 func (m Manager) resolvePrivateDependencies() (container.PrivateDependencyAuthorization, error) {
@@ -631,6 +631,9 @@ func prepareDataRoot(dataRoot, repositoryRoot string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve Codegenbox data path: %w", err)
 	}
+	if err := container.ValidatePrivateStatePath(canonicalDataRoot); err != nil {
+		return "", err
+	}
 	if isWithin(canonicalDataRoot, canonicalRepository) {
 		return "", fmt.Errorf("Codegenbox data root must not be inside the source repository: %s", absoluteDataRoot)
 	}
@@ -654,6 +657,13 @@ func prepareDataRootWithoutRepository(dataRoot string) (string, error) {
 	abs, err := filepath.Abs(dataRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve Codegenbox data root: %w", err)
+	}
+	canonicalBeforeCreate, err := canonicalExistingPath(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve Codegenbox data root: %w", err)
+	}
+	if err := container.ValidatePrivateStatePath(canonicalBeforeCreate); err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(abs, 0o700); err != nil {
 		return "", fmt.Errorf("create Codegenbox data root: %w", err)

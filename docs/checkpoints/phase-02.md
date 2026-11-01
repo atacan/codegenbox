@@ -1,7 +1,8 @@
 # Phase 02 checkpoint — Agent Persistence
 
-Historical checkpoint: the Codex full-home mount described below has been
-replaced by private per-session state seeded only with `auth.json`. See
+Historical checkpoint: the host state mounts described below have been
+replaced for all agents by private per-session state seeded only with selected
+authentication, portable settings, and authored skills. See
 [Persistent agent state](../../README.md#persistent-agent-state) for current
 behavior, including authentication-source overrides and migration.
 

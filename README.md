@@ -97,7 +97,8 @@ ori login
 ```
 
 Do not use `ori login --local`: it writes credentials into the current
-repository, while Codegenbox deliberately mounts only global `~/.ori` state.
+repository. Codegenbox seeds Ori from selected global authentication/settings
+files and keeps its runtime state private to the session.
 The host Ori executable is used only for login; Codegenbox runs its pinned Ori
 binary inside the container.
 
@@ -235,72 +236,95 @@ build or publish images during a normal session.
 
 ## Persistent agent state
 
-Codegenbox gives each run a synthetic container home, `/home/agent`; it never
-mounts host `$HOME`. Codex receives private state for each Codegenbox session,
-seeded only with a read-only snapshot of the host authentication file. Other
-agents' selected state directories remain mounted read-write.
+Every agent uses private state for each Codegenbox session, under
+`<Codegenbox data root>/agent-state/<session-id>/`. Containers use the synthetic
+home `/home/agent`. Host agent directories and host `$HOME` are never mounted.
+The host CLI opens selected seed files read-only and creates separate copies;
+databases, conversations, plugin installations, and caches stay private.
 
-| Agent | Host path assumption | Container path/environment | Override |
+| Agent | Selected host seeds | Private directory / container destination | Source override |
 | --- | --- | --- | --- |
-| Claude Code | `~/.claude` | `/home/agent/.claude`, `HOME=/home/agent` | `CODEGENBOX_CLAUDE_STATE_DIR` |
-| Codex | private `<Codegenbox data root>/agent-state/<session-id>/codex` | `/home/agent/.codex`, `HOME`, `CODEX_HOME` | `CODEGENBOX_CODEX_AUTH_FILE` selects the authentication seed |
-| OpenCode | `$XDG_CONFIG_HOME/opencode` (or `~/.config/opencode`) and `$XDG_DATA_HOME/opencode` (or `~/.local/share/opencode`) | matching paths under `/home/agent`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | `CODEGENBOX_OPENCODE_CONFIG_DIR`, `CODEGENBOX_OPENCODE_DATA_DIR` |
-| Ori | `~/.ori` | `/home/agent/.ori`, `HOME=/home/agent` | `CODEGENBOX_ORI_STATE_DIR` |
+| Claude Code | `~/.claude/.credentials.json`, portable `settings.json`, `CLAUDE.md`, authored `skills/`, `commands/`, `agents/`, `rules/` | `claude` → `/home/agent/.claude` | `CODEGENBOX_CLAUDE_STATE_DIR` |
+| Codex | `$CODEX_HOME` or `~/.codex`: `auth.json`, portable `config.toml` and `*.config.toml` profiles, `AGENTS.md` | `codex` → `/home/agent/.codex` | `CODEGENBOX_CODEX_STATE_DIR` |
+| OpenCode config | `$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`: portable `opencode.json(c)`, `tui.json(c)`, authored skills/agents/commands/rules | `opencode-config` → `/home/agent/.config/opencode` | `CODEGENBOX_OPENCODE_CONFIG_DIR` |
+| OpenCode authentication | `$XDG_DATA_HOME/opencode/auth.json` or `~/.local/share/opencode/auth.json` | `opencode-data` → `/home/agent/.local/share/opencode` | `CODEGENBOX_OPENCODE_DATA_DIR` |
+| Ori | `~/.ori/credentials.json`, `config.json` login mode; legacy `~/.openrouter/credentials.json` fallback | `ori` → `/home/agent/.ori` | `CODEGENBOX_ORI_STATE_DIR` |
+| Shared skills (Codex/OpenCode) | `~/.agents/skills`; Codex also includes legacy `$CODEX_HOME/skills` | `skills` → `/home/agent/.agents/skills` | `CODEGENBOX_AGENT_SKILLS_DIR` |
 
-Direct adapters mount only their own paths. An Ori adapter mounts `~/.ori` plus
-only its selected child harness's paths; for example, Ori/Codex receives
-host `.ori` and private session `.codex` state. Other agents' overrides must name
-their direct state directory; Codegenbox rejects host home, generic config/state
-parents, known cross-agent defaults, commas, and mount collisions. It has no
-user-controlled arbitrary mount flags.
+All overrides select **seed sources only**, never directories to mount. Claude
+also honors host `CLAUDE_CONFIG_DIR`; its explicit Codegenbox source override
+wins. Ori compositions receive private Ori state plus only their selected
+harness's private state. Known host agent paths, custom seed sources, their
+aliases/parents/children, source repositories, and generic home/config parents
+cannot become state mounts or the Codegenbox data root. There are no arbitrary
+mount flags. This isolation works with existing compatible Codegenbox images.
 
-For direct Codex and Ori/Codex, the host CLI copies only `auth.json` into a new
-private home with mode `0700` and credentials with mode `0600`. The source is
-`$CODEX_HOME/auth.json` when set, otherwise `~/.codex/auth.json`.
-`CODEGENBOX_CODEX_AUTH_FILE=/absolute/path/auth.json` overrides the seed file.
-The legacy `CODEGENBOX_CODEX_STATE_DIR` now selects an **authentication source
-directory only**, ahead of host `CODEX_HOME`; its state is never mounted.
-Host configurations, hooks, sessions, SQLite databases, and plugin caches are
-never copied. Host authentication is opened read-only and is never written back
-or mounted, so host atomic credential replacement cannot leave a stale file
-bind mount. The private home uses file-backed credentials and the invoking
-non-root UID/GID, allowing Codex to write refreshes normally. This isolation is
-implemented by the host CLI and also works with existing Codegenbox images.
+Each private location is initialized once, with a marker. Resume and continue
+reuse it without reseeding, preserving refreshes, edits, and deliberate logout
+or file deletion. A new session ID creates new state. Existing pre-isolation
+sessions acquire private homes without importing their former shared history;
+already-private Codex credentials/config are preserved during migration.
+Private state survives clean workspace removal and container disposal. Remove
+`agent-state/<session-id>` only after stopping its container when you want to
+discard that session's credentials, settings, skills, and history. To rebuild a
+snapshot from current host settings, start a new Codegenbox session.
 
-Private Codex state survives container removal, `codegenbox resume`, and
-`codegenbox continue`, including completed sessions whose workspace was removed.
-Existing private credentials are preserved rather than replaced by the seed.
-Different Codegenbox session IDs use different homes and databases. State is
-retained under `agent-state/<session-id>/codex` until you remove that directory
-after stopping its container; removing it discards that session's Codex history
-and credentials. Older sessions acquire a fresh private home on their next run;
-their former shared host history is not imported.
+Directories use mode `0700`; credentials/settings use `0600`; skill scripts
+retain executable permission as `0700`. Containers run as the invoking non-root
+UID/GID so refreshes write only to private copies. Source authentication is
+never mounted or written back. Missing default files, including keychain-only
+logins, leave that private location ready for independent login. An explicitly
+selected missing auth file reports an error. `CODEGENBOX_CLAUDE_AUTH_FILE`,
+`CODEGENBOX_CODEX_AUTH_FILE`, `CODEGENBOX_OPENCODE_AUTH_FILE`, and
+`CODEGENBOX_ORI_AUTH_FILE` select exact auth seed files; `none` disables that
+auth-file seed without deleting private credentials or suppressing credentials
+already present in copied settings. These choices apply at initialization.
 
-OpenAI documents [auth-cache copying for headless machines](https://learn.chatgpt.com/docs/auth#fallback-authenticate-locally-and-copy-your-auth-cache)
-and [persisting refreshed credentials](https://learn.chatgpt.com/docs/auth/ci-cd-auth).
-Copied ChatGPT credentials can still contend when host and container sessions
-rotate the same OAuth grant, so reauthentication may be needed. For independent
-container login, set `CODEGENBOX_CODEX_AUTH_FILE=none` before starting a session
-and use Codex's **Sign in with Device Code** option (when enabled for your
-account/workspace). This disables seeding; it does not delete existing private
-credentials. A missing default cache, including a keyring-only host login,
-also starts with an empty private cache. An explicitly selected missing auth
-file reports an error. To reuse a keyring-only host login, first configure
-Codex's host credential storage as `file` and sign in again, as described in
-the linked OpenAI documentation.
+Portable settings preserve preferences such as models, reasoning, appearance,
+permissions, provider configuration, and remote MCP endpoints. Host hooks,
+notification/status commands, credential helper scripts, local MCP processes,
+plugin/cache references, per-project trust, and machine-specific persistence or
+external instruction paths are omitted. Codex uses file-backed credentials and
+private SQLite/log paths; Claude receives an explicit private
+`CLAUDE_CONFIG_DIR`. Ori carries only its verified `loginMode` setting. JSONC
+comments and TOML formatting are normalized. Host-only integrations need
+container-specific setup; repository configuration continues to load normally.
 
-The image's Codex wrapper still disables user-global hooks declared inside its
-private `CODEX_HOME`, including selected profiles, using per-hook overrides.
-Repository and plugin hooks retain Codex's normal discovery and trust behavior.
-This applies to direct Codex, Ori/Codex, and Codex started from a container shell,
-including the session menu's updated binary. Calling `/usr/local/bin/codex`
-directly bypasses hook filtering while retaining the isolated session home.
+Only authored skill/definition trees are snapshotted. Top-level skill symlinks
+are dereferenced into independent files; nested links are followed only inside
+that resolved skill root. Broken, escaping, cyclic links, special files,
+hidden entries, known runtime/cache directories, and database/history files
+are skipped. Snapshots are bounded to 10,000 files, 128 MiB per authored tree,
+and 16 MiB per file. The image's bundled `srcmv` remains available through a
+fixed container-internal fallback link when no user snapshot provides it.
 
-The default Codegenbox storage root is `~/.local/share/codegenbox` (or
-`$XDG_DATA_HOME/codegenbox`); set `CODEGENBOX_DATA_DIR` to override it. This
-location and all state paths must be shared with Docker/Colima. Standard Colima
-shares the home directory; macOS `/tmp` resolves to `/private/tmp`, which is
-not shared by default.
+Authentication details follow the agents' supported storage:
+
+- [Claude](https://code.claude.com/docs/en/authentication#credential-management)
+  stores macOS logins in Keychain, which Codegenbox never exports. If no portable
+  `.credentials.json` exists, use `/login` inside the private container session.
+- [Codex](https://learn.chatgpt.com/docs/auth) supports copying its file-backed
+  auth cache. A keyring-only host can configure file-backed storage and sign in
+  again, or use **Sign in with Device Code** in the container when enabled.
+  [Copied OAuth grants can still contend during refresh](https://learn.chatgpt.com/docs/auth/ci-cd-auth);
+  independent login avoids sharing that grant.
+- [OpenCode](https://opencode.ai/docs/providers/) stores connected-provider
+  credentials in `auth.json`; use `/connect` when no reusable file is available.
+- Ori uses global `credentials.json`; run its global login before creating a
+  new Codegenbox session when needed. The legacy `.openrouter` fallback is used
+  only without a selected Ori source override and when `.ori/credentials.json`
+  is absent.
+
+The image's Codex wrapper still filters user-global hooks inside its private
+home; repository/plugin hooks retain normal discovery and trust behavior. A
+host skill or settings change is picked up by new sessions, not live-linked
+into an existing session.
+
+The default Codegenbox data root is `~/.local/share/codegenbox` (or
+`$XDG_DATA_HOME/codegenbox`); set `CODEGENBOX_DATA_DIR` to override it. Only this
+private storage and session workspaces must be shared with Docker/Colima.
+Standard Colima shares the home directory; macOS `/tmp` resolves to
+`/private/tmp`, which is not shared by default.
 
 ## Private Git dependencies
 

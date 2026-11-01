@@ -34,8 +34,8 @@ type Adapter struct {
 	Model       string
 }
 
-// StateLocation describes a CLI's in-container state location. Codex's location
-// is backed by private session state, never its host authentication directory.
+// StateLocation describes a CLI's in-container state location. Every location
+// is backed by private session state, never its host seed directory.
 type StateLocation struct {
 	Key         string
 	Destination string
@@ -55,16 +55,18 @@ func Resolve(name, model string) (Adapter, error) {
 	}
 	switch name {
 	case Claude:
-		return Adapter{Name: Claude, Command: []string{"claude"}, Environment: homeEnvironment(), State: []StateLocation{{Key: "CLAUDE_STATE_DIR", Destination: containerHome + "/.claude"}}, Description: "Runs Claude Code with only ~/.claude state mounted at the synthetic container home."}, nil
+		environment := homeEnvironment()
+		environment["CLAUDE_CONFIG_DIR"] = containerHome + "/.claude"
+		return Adapter{Name: Claude, Command: []string{"claude"}, Environment: environment, State: []StateLocation{{Key: "CLAUDE_STATE_DIR", Destination: containerHome + "/.claude"}}, Description: "Runs Claude Code with private session credentials, settings, skills, and runtime state."}, nil
 	case Codex:
 		environment := homeEnvironment()
 		environment["CODEX_HOME"] = containerHome + "/.codex"
-		return Adapter{Name: Codex, Command: []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}, Environment: environment, State: []StateLocation{{Key: "CODEX_STATE_DIR", Destination: containerHome + "/.codex"}}, Description: "Runs Codex with private session state seeded only with a copy of host authentication."}, nil
+		return Adapter{Name: Codex, Command: []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}, Environment: environment, State: []StateLocation{{Key: "CODEX_STATE_DIR", Destination: containerHome + "/.codex"}, {Key: "AGENT_SKILLS_DIR", Destination: containerHome + "/.agents/skills"}}, Description: "Runs Codex with private session state seeded with authentication, portable settings, and skills."}, nil
 	case OpenCode:
 		environment := homeEnvironment()
 		environment["XDG_CONFIG_HOME"] = containerHome + "/.config"
 		environment["XDG_DATA_HOME"] = containerHome + "/.local/share"
-		return Adapter{Name: OpenCode, Command: []string{"opencode"}, Environment: environment, State: []StateLocation{{Key: "OPENCODE_CONFIG_DIR", Destination: containerHome + "/.config/opencode"}, {Key: "OPENCODE_DATA_DIR", Destination: containerHome + "/.local/share/opencode"}}, Description: "Runs OpenCode with its explicit XDG config and data directories mounted."}, nil
+		return Adapter{Name: OpenCode, Command: []string{"opencode"}, Environment: environment, State: []StateLocation{{Key: "OPENCODE_CONFIG_DIR", Destination: containerHome + "/.config/opencode"}, {Key: "OPENCODE_DATA_DIR", Destination: containerHome + "/.local/share/opencode"}, {Key: "AGENT_SKILLS_DIR", Destination: containerHome + "/.agents/skills"}}, Description: "Runs OpenCode with private session config, credentials, runtime state, and skills."}, nil
 	case OriClaude:
 		return oriAdapter(OriClaude, Claude, model), nil
 	case OriCodex:
@@ -85,17 +87,19 @@ func oriAdapter(name, child, model string) Adapter {
 	state := []StateLocation{{Key: "ORI_STATE_DIR", Destination: containerHome + "/.ori"}}
 	switch child {
 	case Claude:
+		environment["CLAUDE_CONFIG_DIR"] = containerHome + "/.claude"
 		state = append(state, StateLocation{Key: "CLAUDE_STATE_DIR", Destination: containerHome + "/.claude"})
 	case Codex:
 		environment["CODEX_HOME"] = containerHome + "/.codex"
 		state = append(state, StateLocation{Key: "CODEX_STATE_DIR", Destination: containerHome + "/.codex"})
+		state = append(state, StateLocation{Key: "AGENT_SKILLS_DIR", Destination: containerHome + "/.agents/skills"})
 		command = append(command, "--dangerously-bypass-approvals-and-sandbox")
 	case OpenCode:
 		environment["XDG_CONFIG_HOME"] = containerHome + "/.config"
 		environment["XDG_DATA_HOME"] = containerHome + "/.local/share"
-		state = append(state, StateLocation{Key: "OPENCODE_CONFIG_DIR", Destination: containerHome + "/.config/opencode"}, StateLocation{Key: "OPENCODE_DATA_DIR", Destination: containerHome + "/.local/share/opencode"})
+		state = append(state, StateLocation{Key: "OPENCODE_CONFIG_DIR", Destination: containerHome + "/.config/opencode"}, StateLocation{Key: "OPENCODE_DATA_DIR", Destination: containerHome + "/.local/share/opencode"}, StateLocation{Key: "AGENT_SKILLS_DIR", Destination: containerHome + "/.agents/skills"})
 	}
-	return Adapter{Name: name, Command: command, Environment: environment, State: state, Model: model, Description: "Runs " + child + " through Ori with only Ori and the selected harness state mounted."}
+	return Adapter{Name: name, Command: command, Environment: environment, State: state, Model: model, Description: "Runs " + child + " through Ori with private per-session state for Ori and its selected harness."}
 }
 
 func validateModel(name, model string) error {
@@ -121,106 +125,15 @@ func homeEnvironment() map[string]string { return map[string]string{"HOME": cont
 // Supported returns names in stable CLI/display order.
 func Supported() []string { return []string{Claude, Codex, OpenCode, OriClaude, OriCodex, OriOpenCode} }
 
-// ResolveState creates and validates only the selected adapter's required
-// direct host paths. Environment overrides intentionally exist per agent, not
-// as a generic mount mechanism.
+// ResolveState refuses state resolution without an explicit private session root.
 func ResolveState(adapter Adapter) ([]container.StateMount, error) {
-	return ResolveSessionState(adapter, "")
+	return nil, fmt.Errorf("%s requires private per-session state", adapter.Name)
 }
 
-// ResolveSessionState requires a Codegenbox-owned, per-session Codex directory
-// for Codex adapters. The legacy CODEGENBOX_CODEX_STATE_DIR override selects an
-// authentication source only; it can never restore a shared Codex home mount.
-func ResolveSessionState(adapter Adapter, codexHome string) ([]container.StateMount, error) {
-	homeRaw, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("resolve home directory for %s state: %w", adapter.Name, err)
-	}
-	home, err := canonicalExistingPath(homeRaw)
-	if err != nil {
-		return nil, fmt.Errorf("canonicalize home directory for %s state: %w", adapter.Name, err)
-	}
-	xdgConfig := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
-	if xdgConfig == "" {
-		xdgConfig = filepath.Join(homeRaw, ".config")
-	}
-	xdgData := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
-	if xdgData == "" {
-		xdgData = filepath.Join(homeRaw, ".local", "share")
-	}
-	xdgConfig, err = canonicalExistingPath(xdgConfig)
-	if err != nil {
-		return nil, fmt.Errorf("canonicalize XDG config directory: %w", err)
-	}
-	xdgData, err = canonicalExistingPath(xdgData)
-	if err != nil {
-		return nil, fmt.Errorf("canonicalize XDG data directory: %w", err)
-	}
-	defaults := map[string]string{"CLAUDE_STATE_DIR": filepath.Join(home, ".claude"), "CODEX_STATE_DIR": filepath.Join(home, ".codex"), "OPENCODE_CONFIG_DIR": filepath.Join(xdgConfig, "opencode"), "OPENCODE_DATA_DIR": filepath.Join(xdgData, "opencode"), "ORI_STATE_DIR": filepath.Join(home, ".ori")}
-	for key, path := range defaults {
-		canonical, err := canonicalExistingPath(path)
-		if err != nil {
-			return nil, fmt.Errorf("canonicalize %s default: %w", key, err)
-		}
-		defaults[key] = canonical
-	}
-	parents := []string{home, xdgConfig, xdgData, filepath.Join(home, ".local")}
-	mounts := make([]container.StateMount, 0, len(adapter.State))
-	for _, location := range adapter.State {
-		if location.Key == "CODEX_STATE_DIR" {
-			if codexHome == "" {
-				return nil, fmt.Errorf("Codex requires private per-session state")
-			}
-			path, err := prepareCodexHome(codexHome)
-			if err != nil {
-				return nil, err
-			}
-			mounts = append(mounts, container.StateMount{Agent: adapter.Name, Source: path, Destination: location.Destination})
-			continue
-		}
-		path := strings.TrimSpace(os.Getenv("CODEGENBOX_" + location.Key))
-		if path == "" {
-			path = defaults[location.Key]
-		}
-		if hasPathTraversal(path) {
-			return nil, fmt.Errorf("%s paths containing traversal are not supported", location.Key)
-		}
-		canonical, err := canonicalExistingPath(path)
-		if err != nil {
-			return nil, fmt.Errorf("resolve %s: %w", location.Key, err)
-		}
-		if err := validateStatePath(adapter.Name, location.Key, canonical, parents, defaults); err != nil {
-			return nil, err
-		}
-		_, statErr := os.Stat(canonical)
-		created := os.IsNotExist(statErr)
-		if statErr != nil && !created {
-			return nil, fmt.Errorf("inspect %s state directory: %w", adapter.Name, statErr)
-		}
-		if err := os.MkdirAll(canonical, 0o700); err != nil {
-			return nil, fmt.Errorf("create %s state directory: %w", adapter.Name, err)
-		}
-		if created {
-			if err := os.Chmod(canonical, 0o700); err != nil {
-				return nil, fmt.Errorf("restrict %s state directory: %w", adapter.Name, err)
-			}
-		}
-		canonical, err = filepath.EvalSymlinks(canonical)
-		if err != nil {
-			return nil, fmt.Errorf("resolve %s state directory: %w", adapter.Name, err)
-		}
-		canonical = filepath.Clean(canonical)
-		if err := validateStatePath(adapter.Name, location.Key, canonical, parents, defaults); err != nil {
-			return nil, err
-		}
-		for _, mount := range mounts {
-			if canonical == mount.Source || isWithin(canonical, mount.Source) || isWithin(mount.Source, canonical) {
-				return nil, fmt.Errorf("%s state source duplicates or nests another selected state source", location.Key)
-			}
-		}
-		mounts = append(mounts, container.StateMount{Agent: adapter.Name, Source: canonical, Destination: location.Destination})
-	}
-	return mounts, nil
+// ResolveSessionState snapshots only selected authentication, portable settings,
+// and authored skills into private session directories. Host state is never mounted.
+func ResolveSessionState(adapter Adapter, sessionRoot string) ([]container.StateMount, error) {
+	return resolveSessionState(adapter, sessionRoot)
 }
 
 func hasPathTraversal(path string) bool {

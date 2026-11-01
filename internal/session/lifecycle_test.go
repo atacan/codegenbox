@@ -514,7 +514,7 @@ func TestLifecyclePrivateDependencyAuthorizationIsEphemeralAndHasNoExtraMount(t 
 		if strings.Contains(strings.Join(invocation.Args, "\x00"), token) {
 			t.Fatalf("token leaked into invocation args: %#v", invocation.Args)
 		}
-		if len(valuesAfterInvocation(invocation.Args, "--mount")) != 2 { // clone plus selected Codex state
+		if len(valuesAfterInvocation(invocation.Args, "--mount")) != 3 { // clone plus private Codex state and skills
 			t.Fatalf("mounts = %#v", valuesAfterInvocation(invocation.Args, "--mount"))
 		}
 		return nil
@@ -652,7 +652,7 @@ func TestOriAdapterAndModelPersistAcrossResumeAndContinue(t *testing.T) {
 			t.Fatalf("Ori command = %#v, want %#v", got, wantCommand)
 		}
 		mounts := valuesAfterInvocation(invocation.Args, "--mount")
-		if len(mounts) != 3 || !strings.Contains(mounts[1], "dst=/home/agent/.ori") || !strings.Contains(mounts[2], "dst=/home/agent/.codex") {
+		if len(mounts) != 4 || !strings.Contains(mounts[1], "dst=/home/agent/.ori") || !strings.Contains(mounts[2], "dst=/home/agent/.codex") || !strings.Contains(mounts[3], "dst=/home/agent/.agents/skills") {
 			t.Fatalf("Ori/Codex mounts = %#v", mounts)
 		}
 	}
@@ -950,22 +950,30 @@ func TestSelectedAgentStateSurvivesReplacementWithoutCrossAgentMounts(t *testing
 	}
 }
 
-func TestProductionCodexStateIsPrivateAndPersistsAcrossLifecycle(t *testing.T) {
-	for _, name := range []string{agent.Codex, agent.OriCodex} {
+func TestProductionAgentStateIsPrivateAndPersistsAcrossLifecycle(t *testing.T) {
+	for _, name := range agent.Supported() {
 		t.Run(name, func(t *testing.T) {
 			home, err := filepath.EvalSymlinks(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("HOME", home)
-			for _, key := range []string{"CODEX_HOME", "CODEGENBOX_CODEX_STATE_DIR", "CODEGENBOX_CODEX_AUTH_FILE", "CODEGENBOX_ORI_STATE_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME"} {
+			for _, key := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "CODEGENBOX_CODEX_STATE_DIR", "CODEGENBOX_CODEX_AUTH_FILE", "CODEGENBOX_CLAUDE_STATE_DIR", "CODEGENBOX_CLAUDE_AUTH_FILE", "CODEGENBOX_OPENCODE_CONFIG_DIR", "CODEGENBOX_OPENCODE_DATA_DIR", "CODEGENBOX_OPENCODE_AUTH_FILE", "CODEGENBOX_ORI_STATE_DIR", "CODEGENBOX_ORI_AUTH_FILE", "CODEGENBOX_AGENT_SKILLS_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME"} {
 				t.Setenv(key, "")
 			}
-			host := filepath.Join(home, ".codex")
+			harness := strings.TrimPrefix(name, "ori/")
+			hostSuffix, privateSuffix, authFile := ".codex", ".codex", "auth.json"
+			switch harness {
+			case agent.Claude:
+				hostSuffix, privateSuffix, authFile = ".claude", ".claude", ".credentials.json"
+			case agent.OpenCode:
+				hostSuffix, privateSuffix, authFile = ".local/share/opencode", ".local/share/opencode", "auth.json"
+			}
+			host := filepath.Join(home, hostSuffix)
 			if err := os.MkdirAll(host, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			writeFile(t, filepath.Join(host, "auth.json"), "fake-auth-fixture")
+			writeFile(t, filepath.Join(host, authFile), "fake-auth-fixture")
 			writeFile(t, filepath.Join(host, "thread_history_1.sqlite"), "host-database-sentinel")
 			repository := newRepository(t)
 			dataRoot := filepath.Join(home, "codegenbox")
@@ -976,14 +984,14 @@ func TestProductionCodexStateIsPrivateAndPersistsAcrossLifecycle(t *testing.T) {
 				calls++
 				var source string
 				for _, mount := range valuesAfterInvocation(invocation.Args, "--mount") {
-					if strings.HasSuffix(mount, ",dst=/home/agent/.codex") {
-						source = strings.TrimSuffix(strings.TrimPrefix(mount, "type=bind,src="), ",dst=/home/agent/.codex")
+					if strings.HasSuffix(mount, ",dst=/home/agent/"+privateSuffix) {
+						source = strings.TrimSuffix(strings.TrimPrefix(mount, "type=bind,src="), ",dst=/home/agent/"+privateSuffix)
 					}
 				}
 				if source == "" || source == host || !isWithin(source, dataRoot) {
-					t.Fatalf("unsafe or missing private Codex source %q", source)
+					t.Fatalf("unsafe or missing private agent source %q", source)
 				}
-				contents, err := os.ReadFile(filepath.Join(source, "auth.json"))
+				contents, err := os.ReadFile(filepath.Join(source, authFile))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -993,7 +1001,7 @@ func TestProductionCodexStateIsPrivateAndPersistsAcrossLifecycle(t *testing.T) {
 					if string(contents) != "fake-auth-fixture" {
 						t.Fatal("first run did not seed authentication")
 					}
-					writeFile(t, filepath.Join(source, "auth.json"), "refreshed-private-fixture")
+					writeFile(t, filepath.Join(source, authFile), "refreshed-private-fixture")
 					writeFile(t, filepath.Join(source, "thread_history_1.sqlite"), "container-database-sentinel")
 					writeFile(t, filepath.Join(workspace, "dirty.txt"), "retain")
 				} else if calls < 4 {
@@ -1030,10 +1038,10 @@ func TestProductionCodexStateIsPrivateAndPersistsAcrossLifecycle(t *testing.T) {
 			if calls != 4 {
 				t.Fatalf("runner calls = %d", calls)
 			}
-			auth, _ := os.ReadFile(filepath.Join(host, "auth.json"))
+			auth, _ := os.ReadFile(filepath.Join(host, authFile))
 			database, _ := os.ReadFile(filepath.Join(host, "thread_history_1.sqlite"))
 			if string(auth) != "fake-auth-fixture" || string(database) != "host-database-sentinel" {
-				t.Fatal("lifecycle modified host Codex state")
+				t.Fatal("lifecycle modified host agent state")
 			}
 		})
 	}
@@ -1050,10 +1058,10 @@ func selectedStateSource(t *testing.T, invocation container.Invocation, name str
 		if name == "claude" && !strings.Contains(mount, "dst=/home/agent/.claude") {
 			t.Fatalf("Claude received foreign state mount %q", mount)
 		}
-		if name == "codex" && !strings.Contains(mount, "dst=/home/agent/.codex") {
+		if name == "codex" && !(strings.Contains(mount, "dst=/home/agent/.codex") || strings.Contains(mount, "dst=/home/agent/.agents/skills")) {
 			t.Fatalf("Codex received foreign state mount %q", mount)
 		}
-		if name == "opencode" && !(strings.Contains(mount, "dst=/home/agent/.config/opencode") || strings.Contains(mount, "dst=/home/agent/.local/share/opencode")) {
+		if name == "opencode" && !(strings.Contains(mount, "dst=/home/agent/.config/opencode") || strings.Contains(mount, "dst=/home/agent/.local/share/opencode") || strings.Contains(mount, "dst=/home/agent/.agents/skills")) {
 			t.Fatalf("OpenCode received foreign state mount %q", mount)
 		}
 		if selected == "" {
@@ -1269,6 +1277,60 @@ func TestStartBaseBranchLeavesSourceCheckoutUnchanged(t *testing.T) {
 			}
 			if runGit(t, repository, "branch", "--show-current") != "feature" || runGit(t, repository, "rev-parse", "HEAD") != featureCommit || runGit(t, repository, "rev-parse", "main") != mainCommit || runGit(t, repository, "status", "--porcelain") != sourceStatus {
 				t.Fatal("source checkout changed")
+			}
+		})
+	}
+}
+
+func TestDataRootCannotWriteIntoHostAgentStateBeforeIsolationChecks(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, key := range []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "CODEGENBOX_CODEX_STATE_DIR", "CODEGENBOX_CODEX_AUTH_FILE", "CODEGENBOX_CLAUDE_STATE_DIR", "CODEGENBOX_OPENCODE_CONFIG_DIR", "CODEGENBOX_OPENCODE_DATA_DIR", "CODEGENBOX_ORI_STATE_DIR", "CODEGENBOX_AGENT_SKILLS_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME"} {
+		t.Setenv(key, "")
+	}
+	repository := newRepository(t)
+	adapter, _ := agent.Lookup(agent.Codex)
+	for _, directory := range []string{".codex", ".claude", ".ori", ".config/opencode", ".local/share/opencode", ".agents/skills", "custom-seed"} {
+		t.Run(directory, func(t *testing.T) {
+			protected := filepath.Join(home, directory)
+			if err := os.MkdirAll(protected, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(protected, "sentinel"), "untouched")
+			if directory == "custom-seed" {
+				t.Setenv("CODEGENBOX_CLAUDE_STATE_DIR", protected)
+			}
+			alias := filepath.Join(home, "alias-"+strings.ReplaceAll(directory, "/", "-"))
+			if err := os.Symlink(protected, alias); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{protected, filepath.Join(protected, "new-data"), alias} {
+				manager := testManager(path, runnerFunc(func(context.Context, container.Invocation) error { t.Fatal("unsafe runner executed"); return nil }))
+				for _, run := range []func() error{
+					func() error {
+						_, err := manager.Start(context.Background(), repository, adapter, "image", "docker")
+						return err
+					},
+					func() error {
+						_, err := manager.Resume(context.Background(), "project-20260903-193012-a82f", "image", "docker")
+						return err
+					},
+					func() error {
+						_, err := manager.Continue(context.Background(), "project-20260903-193012-a82f", "image", "docker")
+						return err
+					},
+				} {
+					if err := run(); err == nil || !strings.Contains(err.Error(), "host agent state") {
+						t.Fatalf("unsafe data root error = %v", err)
+					}
+				}
+			}
+			entries, err := os.ReadDir(protected)
+			if err != nil || len(entries) != 1 || entries[0].Name() != "sentinel" {
+				t.Fatalf("host agent state was modified: %#v, %v", entries, err)
 			}
 		})
 	}
